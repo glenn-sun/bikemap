@@ -1,0 +1,82 @@
+html, body, #map {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+#controls {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  background: rgba(255, 255, 255, 0.94);
+  padding: 6px 10px 10px;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  font-size: 12px;
+  user-select: none;
+  max-width: 220px;
+}
+
+#controls fieldset {
+  border: none;
+  padding: 0;
+  margin: 0 0 6px 0;
+}
+
+#controls fieldset:last-child {
+  margin-bottom: 0;
+}
+
+#controls legend {
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #555;
+  padding: 4px 0 2px;
+}
+
+#controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 1px 0;
+}
+
+.pop {
+  font-size: 12px;
+  line-height: 1.4;
+  color: #222;
+}
+
+.pop-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.pop-row {
+  margin-top: 2px;
+}
+
+.pop-key {
+  color: #666;
+  font-size: 11px;
+  margin-right: 4px;
+}
+
+.pop a {
+  color: #1e88e5;
+  text-decoration: none;
+}
+
+.pop a:hover {
+  text-decoration: underline;
+}

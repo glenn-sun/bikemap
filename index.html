@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Seattle Bike Map</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="controls">
+      <fieldset>
+        <legend>Bike infrastructure</legend>
+        <label><input type="checkbox" id="toggle-aaa" checked /> All ages &amp; abilities (dark green)</label>
+        <label><input type="checkbox" id="toggle-bbl" checked /> Buffered bike lanes</label>
+        <label><input type="checkbox" id="toggle-bl" checked /> Standard bike lanes</label>
+        <label><input type="checkbox" id="toggle-sharrows" checked /> Sharrows / climbing lanes</label>
+        <label><input type="checkbox" id="toggle-planned" /> Planned (gray dotted)</label>
+        <label><input type="checkbox" id="toggle-construction" /> Under construction (dotted)</label>
+      </fieldset>
+      <fieldset>
+        <legend>Points</legend>
+        <label><input type="checkbox" id="toggle-light-rail" checked /> Light rail stations</label>
+        <label><input type="checkbox" id="toggle-pois" checked /> Points of interest</label>
+        <label><input type="checkbox" id="toggle-restrooms" checked /> Restrooms</label>
+        <label><input type="checkbox" id="toggle-bike-racks" checked /> Bike racks</label>
+        <label><input type="checkbox" id="toggle-bike-signs" checked /> Bike signage</label>
+      </fieldset>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
