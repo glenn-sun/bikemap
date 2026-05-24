@@ -42,6 +42,10 @@ class Layer:
     where: str = "1=1"
     page_size: int = 1000
     clip_to_seattle: bool = True
+    # Comma-separated field list. Default "*" returns everything; set this to
+    # slim the GeoJSON when we only need a handful of attributes (matters for
+    # large layers like seattle_streets that would otherwise be ~40 MB).
+    out_fields: str = "*"
     # Some servers reject f=geojson and need esriJSON -> manual conversion; not needed here.
 
 
@@ -98,6 +102,47 @@ LAYERS: list[Layer] = [
             "CATEGORY = 'GBP' AND "
             "(CURRENT_STATUS IN ('INSVC') OR CURRENT_STATUS IS NULL)"
         ),
+    ),
+    # ---------- Routing inputs ----------
+    # Per-segment road geometry + attributes for the routing graph.
+    # SURFACEWIDTH drives lane-count derivation; ARTCLASS drives centerline
+    # presence. Slim outFields keeps the file ~8 MB instead of 40.
+    Layer(
+        "seattle_streets",
+        f"{SDOT}/Seattle_Streets_1/FeatureServer/0",
+        where="STATUS = 'INSVC'",
+        out_fields="COMPKEY,UNITDESC,ARTCLASS,SURFACEWIDTH,SPEEDLIMIT,ONEWAY",
+    ),
+    # NOTE: alleys.geojson is NOT fetched from SDOT — SEGMENT_TYPE=15 turned
+    # out to be tiny micro-segments, not real alleys. Instead, build_graph.py
+    # derives alleys.geojson from OSM ways tagged highway=service + service=alley.
+    # Intersection-control points snapped to graph nodes; zero out the
+    # crossing penalty when present.
+    Layer(
+        "signals",
+        f"{SDOT}/Traffic_Signal_Assemblies_(Active)/FeatureServer/0",
+        where="CURRENT_STATUS = 'INSVC'",
+        out_fields="UNITDESC,SIGNAL_TYPE,INTKEY",
+    ),
+    Layer(
+        "crosswalks",
+        f"{SDOT}/Marked_Crosswalks_(Active)/FeatureServer/0",
+        where="CURRENT_STATUS = 'INSVC'",
+        out_fields="UNITDESC,MARKING_TYPE,SCHOOL,MIDBLOCK_CROSSWALK",
+    ),
+    Layer(
+        "beacons",
+        f"{SDOT}/Beacon_Assemblies_(Active)/FeatureServer/0",
+        where="CURRENT_STATUS = 'INSVC'",
+        out_fields="UNITDESC,CATEGORY",
+    ),
+    # Neighborhood traffic circles — collapsed to single nodes during graph
+    # build so a left turn around the circle counts as one turn.
+    Layer(
+        "traffic_circles",
+        f"{SDOT}/Traffic_Circles_view/FeatureServer/0",
+        where="CURRENT_STATUS = 'INSVC'",
+        out_fields="UNITDESC,INTKEY,TRCSIZE",
     ),
 ]
 
@@ -185,7 +230,7 @@ def fetch_layer(layer: Layer) -> dict:
     while True:
         params = {
             "where": layer.where,
-            "outFields": "*",
+            "outFields": layer.out_fields,
             "outSR": "4326",
             "geometryPrecision": "6",
             "f": "geojson",

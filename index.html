@@ -26,7 +26,15 @@
         <label><input type="checkbox" id="toggle-bike-racks" checked /> Bike racks</label>
         <label><input type="checkbox" id="toggle-bike-signs" checked /> Bike signage</label>
       </fieldset>
+      <fieldset>
+        <legend>Routing</legend>
+        <label><input type="checkbox" id="toggle-signals-debug" /> Traffic signals (debug)</label>
+        <label><input type="checkbox" id="toggle-crosswalks-debug" /> Crosswalks (debug)</label>
+        <label><input type="checkbox" id="toggle-beacons-debug" /> Beacons (debug)</label>
+        <button id="clear-route" type="button">Clear route</button>
+      </fieldset>
     </div>
+    <div id="directions-panel" hidden></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

@@ -59,6 +59,31 @@ function abbreviateDirectionals(nameExpr) {
 const ROAD_NAME = abbreviateDirectionals(['get', 'name']);
 
 /**
+ * Plain-string version of the same directional abbreviation rules — used by
+ * the routing directions panel where we already have the name as a JS string
+ * (not a MapLibre expression). Keeps the two surfaces in lock-step.
+ */
+export function abbreviateDirectionalsStr(name) {
+  if (!name) return name;
+  let s = name;
+  // Prefix swaps
+  for (const [full, abbr] of DIRECTIONALS) {
+    if (s.startsWith(full + ' ')) {
+      s = abbr + ' ' + s.slice(full.length + 1);
+      break;
+    }
+  }
+  // Suffix swaps
+  for (const [full, abbr] of DIRECTIONALS) {
+    if (s.endsWith(' ' + full)) {
+      s = s.slice(0, s.length - full.length - 1) + ' ' + abbr;
+      break;
+    }
+  }
+  return s;
+}
+
+/**
  * Returns the label layer array to append on top of the basemap fills/lines.
  * Pass the same source name used for the pmtiles vector source.
  */

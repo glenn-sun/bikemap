@@ -8,6 +8,7 @@ import { desaturateBasemapLayers } from './basemap.js';
 import { basemapLabelLayers } from './labels.js';
 import { VisibilityManager } from './visibility.js';
 import { attachPopups } from './popups.js';
+import { initRoutingUI } from './routing/ui.js';
 
 const protocol = new Protocol();
 maplibregl.addProtocol('pmtiles', protocol.tile);
@@ -55,6 +56,7 @@ map.on('load', () => {
     .then(() => {
       wireToggles(map);
       attachPopups(map);
+      initRoutingUI(map);
     })
     .catch((err) => console.error('addDataLayers failed:', err));
 });
@@ -84,6 +86,9 @@ function wireToggles(map) {
   vm.group('restrooms',   ['parks-restrooms']);
   vm.group('bike-racks',  ['bike-racks']);
   vm.group('bike-signs',  ['bike-signs']);
+  vm.group('signals-debug',    ['signals-debug']);
+  vm.group('crosswalks-debug', ['crosswalks-debug']);
+  vm.group('beacons-debug',    ['beacons-debug']);
 
   vm.bindCheckbox('aaa',         'toggle-aaa')
     .bindCheckbox('bbl',         'toggle-bbl')
@@ -96,6 +101,9 @@ function wireToggles(map) {
     .bindCheckbox('restrooms',   'toggle-restrooms')
     .bindCheckbox('bike-racks',  'toggle-bike-racks')
     .bindCheckbox('bike-signs',  'toggle-bike-signs')
+    .bindCheckbox('signals-debug',    'toggle-signals-debug')
+    .bindCheckbox('crosswalks-debug', 'toggle-crosswalks-debug')
+    .bindCheckbox('beacons-debug',    'toggle-beacons-debug')
     .apply();
 }
 

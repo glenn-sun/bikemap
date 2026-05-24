@@ -152,6 +152,11 @@ export async function addDataLayers(map, beforeId = undefined) {
     community_centers: 'community_centers',
     libraries: 'libraries',
     light_rail_stations: 'light_rail_stations',
+    // Routing prototype: visual-verification sources. All start hidden; users
+    // toggle them on to sanity-check the data feeding the routing graph.
+    signals: 'signals',
+    crosswalks: 'crosswalks',
+    beacons: 'beacons',
   };
   for (const [id, name] of Object.entries(sources)) {
     map.addSource(id, { type: 'geojson', data: DATA(name) });
@@ -376,5 +381,53 @@ export async function addDataLayers(map, beforeId = undefined) {
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
     },
+  });
+
+  // ---------- routing-prototype debug layers ----------
+  // All hidden by default; toggleable. Owner uses these to spot-check that
+  // the SDOT classifications we route on (alleys, signal-controlled
+  // intersections, marked crosswalks, beacons) match what's actually on
+  // the street.
+
+  add({
+    id: 'signals-debug',
+    type: 'circle',
+    source: 'signals',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 4.5],
+      'circle-color': '#ff3030',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 1,
+      'circle-opacity': 0.9,
+    },
+    layout: { visibility: 'none' },
+  });
+
+  add({
+    id: 'crosswalks-debug',
+    type: 'circle',
+    source: 'crosswalks',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 1, 14, 2.6],
+      'circle-color': '#ffd400',
+      'circle-stroke-color': '#7a5d00',
+      'circle-stroke-width': 0.6,
+      'circle-opacity': 0.85,
+    },
+    layout: { visibility: 'none' },
+  });
+
+  add({
+    id: 'beacons-debug',
+    type: 'circle',
+    source: 'beacons',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2.5, 14, 5],
+      'circle-color': '#a020f0',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 1,
+      'circle-opacity': 0.9,
+    },
+    layout: { visibility: 'none' },
   });
 }
