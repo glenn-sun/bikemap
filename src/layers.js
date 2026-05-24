@@ -133,11 +133,16 @@ export async function addDataLayers(map, beforeId = undefined) {
   // Local helper so every layer we add slots in just below the basemap labels.
   const add = (layer) => map.addLayer(layer, beforeId);
   // ---------- icon loads (parallel) ----------
+  // POI fill colors are picked to read as distinct symbols and to stay
+  // clear of the standard Google-blue `.user-location-dot` (#4285f4).
+  // Restrooms shift to a deeper indigo, light rail to a darker teal,
+  // and bike-signs (below) move to brown — none of which compete with
+  // the live-location marker.
   await Promise.all([
-    loadMaterialIcon(map, 'wc',            '#3aa0ff'),  // park restrooms
-    loadMaterialIcon(map, 'groups',        '#1faa8d'),  // community centers
-    loadMaterialIcon(map, 'local_library', '#d97506'),  // libraries
-    loadMaterialIcon(map, 'train',         '#0091B3'),  // light rail stations
+    loadMaterialIcon(map, 'wc',            '#3949ab'),  // park restrooms (indigo)
+    loadMaterialIcon(map, 'groups',        '#1faa8d'),  // community centers (teal-green)
+    loadMaterialIcon(map, 'local_library', '#d97506'),  // libraries (amber)
+    loadMaterialIcon(map, 'train',         '#00838f'),  // light rail stations (darker teal)
   ]);
 
   // ---------- sources ----------
@@ -157,6 +162,7 @@ export async function addDataLayers(map, beforeId = undefined) {
     signals: 'signals',
     crosswalks: 'crosswalks',
     beacons: 'beacons',
+    stop_signs: 'stop_signs',
   };
   for (const [id, name] of Object.entries(sources)) {
     map.addSource(id, { type: 'geojson', data: DATA(name) });
@@ -311,14 +317,15 @@ export async function addDataLayers(map, beforeId = undefined) {
     },
   });
 
-  // Bike route signs — blue dots a bit larger than bike-rack dots; all zooms.
+  // Bike route signs — brown wayfinding dots, distinct from the standard
+  // blue user-location marker. Slightly larger than bike-rack dots.
   add({
     id: 'bike-signs',
     type: 'circle',
     source: 'bike_signs',
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 0.7, 13, 2.5, 17, 5],
-      'circle-color': '#1e88e5',
+      'circle-color': '#6d4c41',
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 12, 0, 14, 0.5],
       'circle-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.35, 14, 0.85],
@@ -424,6 +431,22 @@ export async function addDataLayers(map, beforeId = undefined) {
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2.5, 14, 5],
       'circle-color': '#a020f0',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 1,
+      'circle-opacity': 0.9,
+    },
+    layout: { visibility: 'none' },
+  });
+
+  // Stop signs — stop-sign-red (filled), white halo to distinguish from
+  // the brighter signals-debug red.
+  add({
+    id: 'stop-signs-debug',
+    type: 'circle',
+    source: 'stop_signs',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 1.8, 14, 4],
+      'circle-color': '#c8102e',
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 1,
       'circle-opacity': 0.9,

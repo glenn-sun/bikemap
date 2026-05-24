@@ -8,6 +8,26 @@
 // dictionary we fall back to the raw value so the user can still spot it.
 
 import maplibregl from 'maplibre-gl';
+import { isChoosingOnMap } from './routing/mode.js';
+import { routeFromMyLocationTo } from './routing/ui.js';
+
+// POI-style layers that get a "Go" button in their popup. Linear bike
+// infrastructure and routing-debug overlays are excluded — they aren't
+// destinations a user would route to from their current location.
+const POI_LAYERS = new Set([
+  'libraries', 'community-centers', 'parks-restrooms',
+  'light-rail-stations', 'bike-racks', 'bike-signs',
+]);
+
+function popupTitleFromHtml(html) {
+  const m = html.match(/<div class="pop-title">([\s\S]*?)<\/div>/);
+  if (!m) return 'Destination';
+  // Strip any nested HTML in the title (e.g. &mdash; entities, <a>).
+  const tmp = document.createElement('div');
+  tmp.innerHTML = m[1];
+  const txt = tmp.textContent || '';
+  return txt.trim() || 'Destination';
+}
 
 // ---------- helpers ----------
 
@@ -174,20 +194,60 @@ const CLICKABLE_LAYERS = Object.keys(formatters).filter((k) => !k.startsWith('__
 
 // ---------- wire-up ----------
 
+const ROUTE_LINE_LAYERS = ['route-line', 'route-alt-line'];
+
+function clickedOnRouteLine(map, e) {
+  // queryRenderedFeatures throws if a queried layer doesn't exist yet; only
+  // ask about layers that currently exist on the map.
+  const present = ROUTE_LINE_LAYERS.filter((id) => map.getLayer(id));
+  if (!present.length) return false;
+  return map.queryRenderedFeatures(e.point, { layers: present }).length > 0;
+}
+
 export function attachPopups(map) {
   for (const layerId of CLICKABLE_LAYERS) {
     map.on('click', layerId, (e) => {
+      // In choose-on-map mode the routing UI is consuming the next map
+      // click as an endpoint pick; do not also pop a feature popup over it.
+      if (isChoosingOnMap()) return;
+      // If the click also lands on a route line, the routing UI is
+      // handling it (promoting an alternate) — don't summon an unrelated
+      // bike-rack / restroom / etc. popup over the same pixel.
+      if (clickedOnRouteLine(map, e)) return;
       if (!e.features || !e.features.length) return;
       const f = e.features[0];
       const html = formatters[layerId](f.properties);
       if (!html || !html.trim()) return;
-      new maplibregl.Popup({ closeButton: true, maxWidth: '320px' })
-        .setLngLat(pointFromFeature(f, e.lngLat))
+      const ll = pointFromFeature(f, e.lngLat);
+      const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '320px' })
+        .setLngLat(ll)
         .setHTML(`<div class="pop">${html}</div>`)
         .addTo(map);
+      if (POI_LAYERS.has(layerId)) {
+        const popEl = popup.getElement()?.querySelector('.pop');
+        if (popEl) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'pop-go-btn';
+          btn.title = 'Route here from my location';
+          btn.innerHTML = '<span class="material-symbols-outlined">directions</span>Go';
+          btn.addEventListener('click', () => {
+            const label = popupTitleFromHtml(html);
+            popup.remove();
+            routeFromMyLocationTo(ll[0], ll[1], label);
+          });
+          popEl.appendChild(btn);
+        }
+      }
     });
-    map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
-    map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+    map.on('mouseenter', layerId, () => {
+      if (isChoosingOnMap()) return;
+      map.getCanvas().style.cursor = 'pointer';
+    });
+    map.on('mouseleave', layerId, () => {
+      if (isChoosingOnMap()) return;
+      map.getCanvas().style.cursor = '';
+    });
   }
 }
 

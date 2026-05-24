@@ -23,6 +23,31 @@ const SHARP_DEG = 110;
 // so the route doesn't fragment into a "Continue" sub-step.
 const FILLIN_MAX_FT = 100;
 
+// Trailing bike-facility tokens that should be ignored when comparing
+// two street names for the purpose of merging consecutive steps. The
+// same physical corridor often shows up in OSM under several names
+// (e.g. "Westlake Cycle Track" + "Westlake Protected Bike Lane" along
+// the same path), causing the step list to flip between them. Stripping
+// these for *comparison only* collapses the flip-flop. Longest first so
+// "protected bike lane" wins over "bike lane".
+const FACILITY_SUFFIXES = [
+  'protected bike lane',
+  'bike lane', 'bike path',
+  'cycle track', 'cycletrack', 'cycleway',
+];
+
+function normName(s) {
+  if (!s) return '';
+  let n = s.toLowerCase().trim();
+  for (const suf of FACILITY_SUFFIXES) {
+    if (n.endsWith(' ' + suf)) {
+      n = n.slice(0, n.length - suf.length - 1).trim();
+      break;
+    }
+  }
+  return n;
+}
+
 function fillInUnnamedConnectors(graph, pathEdgeIds) {
   const names = pathEdgeIds.map(eid => graph.edgeStreetName(eid));
   // Walk forward, locate runs of null/empty names whose neighbors share a name.
@@ -39,7 +64,7 @@ function fillInUnnamedConnectors(graph, pathEdgeIds) {
     const beforeName = i > 0 ? names[i - 1] : null;
     const afterName  = j < names.length ? names[j] : null;
     if (beforeName && afterName
-        && beforeName.toLowerCase().trim() === afterName.toLowerCase().trim()) {
+        && normName(beforeName) === normName(afterName)) {
       for (let k = i; k < j; k++) names[k] = beforeName;
     }
     i = j - 1;
@@ -67,15 +92,17 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
   let segStart = 0;
 
   // Group consecutive edges by normalized streetName (after the fill-in
-  // pass). Case-insensitive + null-tolerant.
-  const norm = (s) => (s || '').toLowerCase().trim();
+  // pass). Case-insensitive + null-tolerant. Bike-facility suffix
+  // variants ("Cycle Track" / "Protected Bike Lane" / "Bike Path" / …)
+  // are stripped for comparison so an OSM-flip-flopping corridor renders
+  // as one step.
   while (segStart < pathEdgeIds.length) {
     const startEdge = pathEdgeIds[segStart];
     const name = edgeNames[segStart];
-    const nameN = norm(name);
+    const nameN = normName(name);
     let segEnd = segStart;
     while (segEnd + 1 < pathEdgeIds.length
-        && norm(edgeNames[segEnd + 1]) === nameN) {
+        && normName(edgeNames[segEnd + 1]) === nameN) {
       segEnd++;
     }
 
@@ -110,6 +137,22 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
     // one-way, the bike lane direction equals the travel direction.
     if (hasOnewayLane && !allRoadOneway) {
       annotations.push('One-way bike lane may or may not be in direction of travel');
+    }
+
+    // Skip a bare "Continue" with no street name — it carries no info
+    // (no maneuver, no street to confirm you're on). Absorb the distance
+    // and any annotations into the previous step so the running mileage
+    // stays correct. Step 0 is exempt because "Head <cardinal>" is its
+    // own useful instruction even when unnamed.
+    if (segStart !== 0 && !name && instruction === 'Continue'
+        && steps.length > 0) {
+      const prev = steps[steps.length - 1];
+      prev.distanceFt += distanceFt;
+      for (const a of annotations) {
+        if (!prev.annotations.includes(a)) prev.annotations.push(a);
+      }
+      segStart = segEnd + 1;
+      continue;
     }
 
     // Maneuver point: where this step begins. For step 0 that's the

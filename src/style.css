@@ -9,31 +9,75 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 }
 
-#controls {
+/* Material Symbols sizing default for the UI chrome. The font itself ships
+ * as a variable font; these rules align it with the surrounding text. */
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 18px;
+  display: inline-block;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+  vertical-align: middle;
+}
+
+/* ============ Shared panel chrome ============ */
+
+#left-stack {
   position: absolute;
   top: 10px;
   left: 10px;
   z-index: 1;
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* MapLibre's ScaleControl + attribution sit at bottom-left; leave room
+   * (~50px) so the directions list doesn't overlap the ruler. */
+  max-height: calc(100vh - 60px);
+}
+
+#routing-panel, #directions-panel, #layers-panel {
   background: rgba(255, 255, 255, 0.94);
   padding: 6px 10px 10px;
   border-radius: 6px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
   font-size: 12px;
   user-select: none;
-  max-width: 220px;
 }
 
-#controls fieldset {
+#routing-panel { flex-shrink: 0; }
+#directions-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#layers-panel {
+  position: absolute;
+  top: 10px;
+  right: 60px;          /* leaves room for MapLibre's NavigationControl */
+  width: 210px;
+  max-height: calc(100vh - 20px);
+  overflow-y: auto;
+  z-index: 1;
+}
+
+#routing-panel fieldset, #layers-panel fieldset {
   border: none;
   padding: 0;
   margin: 0 0 6px 0;
 }
-
-#controls fieldset:last-child {
+#routing-panel fieldset:last-of-type, #layers-panel fieldset:last-child {
   margin-bottom: 0;
 }
-
-#controls legend {
+#routing-panel legend, #layers-panel legend {
   font-weight: 600;
   font-size: 11px;
   text-transform: uppercase;
@@ -41,8 +85,7 @@ body {
   color: #555;
   padding: 4px 0 2px;
 }
-
-#controls label {
+#layers-panel label {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -50,67 +93,379 @@ body {
   padding: 1px 0;
 }
 
+/* ============ Popups (per-layer) ============ */
+
 .pop {
   font-size: 12px;
   line-height: 1.4;
   color: #222;
 }
+.pop-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.pop-row { margin-top: 2px; }
+.pop-key { color: #666; font-size: 11px; margin-right: 4px; }
+.pop a { color: #1e88e5; text-decoration: none; }
+.pop a:hover { text-decoration: underline; }
 
-.pop-title {
+/* "Go" button shown in POI popups — routes from the user's current
+ * location to the popup's feature. */
+.pop-go-btn {
+  margin-top: 8px;
+  font-size: 12px;
   font-weight: 600;
-  font-size: 13px;
-  margin-bottom: 4px;
+  padding: 5px 12px;
+  border: none;
+  background: #e91e63;
+  color: #ffffff;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.pop-go-btn:hover { background: #c2185b; }
+.pop-go-btn:disabled { background: #ccc; cursor: not-allowed; }
+.pop-go-btn .material-symbols-outlined { font-size: 14px; }
+
+/* Blue dot showing the user's current GPS position. Tracks the same
+ * pattern as Google Maps' "you are here" indicator. Sized to roughly
+ * match the on-map POI dots (bike-racks, bike-signs) so it reads as a
+ * peer marker rather than dominating the viewport. */
+.user-location-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #4285f4;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2), 0 1px 3px rgba(0, 0, 0, 0.35);
 }
 
-.pop-row {
-  margin-top: 2px;
-}
+/* ============ Route endpoints (address inputs) ============ */
 
-.pop-key {
-  color: #666;
-  font-size: 11px;
-  margin-right: 4px;
-}
-
-.pop a {
-  color: #1e88e5;
-  text-decoration: none;
-}
-
-.pop a:hover {
-  text-decoration: underline;
-}
-
-/* ---------- Routing panel ---------- */
-
-#controls #clear-route {
-  margin-top: 6px;
+.addr-input-wrap { position: relative; margin: 3px 0; }
+.addr-input {
+  box-sizing: border-box;
   width: 100%;
+  padding: 5px 7px;
+  font-size: 12px;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  outline: none;
+  background: #fff;
+}
+.addr-input::placeholder { color: #999; font-size: 11px; }
+.addr-input:focus { border-color: #e91e63; box-shadow: 0 0 0 1px #e91e6333; }
+
+.addr-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 1px 0 0;
+  padding: 0;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  z-index: 5;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.addr-sugg {
+  padding: 6px 8px;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.addr-sugg:last-child { border-bottom: none; }
+.addr-sugg:hover, .addr-sugg.active { background: #fce4ec; }
+.addr-sugg-text { color: #222; display: inline-flex; align-items: center; gap: 4px; }
+.addr-sugg-sub  { color: #888; font-size: 10.5px; padding-left: 22px; }
+.addr-sugg-cat  { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
+
+.addr-sugg.option-row { background: #fafafa; }
+.addr-sugg.option-row.active, .addr-sugg.option-row:hover { background: #fce4ec; }
+.addr-sugg.option-row .material-symbols-outlined {
+  font-size: 16px;
+  color: #e91e63;
+  width: 18px;
+}
+.addr-sugg.option-row.disabled .addr-sugg-sub { color: #aaa; font-style: italic; }
+
+/* ============ App title bar (top of routing-panel) ============ */
+
+#app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px 0 6px;
+  padding: 0 0 6px;
+  border-bottom: 1px solid #eee;
+}
+.app-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #222;
+  line-height: 1.2;
+}
+
+/* ============ Route style segmented control ============ */
+
+.segmented-control {
+  display: flex;
+  border: 1px solid #bbb;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+}
+.segmented-control input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.segmented-control label {
+  flex: 1;
+  text-align: center;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  color: #333;
+  border-right: 1px solid #ddd;
+  user-select: none;
+  background: #fff;
+  transition: background 0.1s, color 0.1s;
+}
+.segmented-control label:last-of-type { border-right: none; }
+.segmented-control label:hover { background: #fce4ec; }
+.segmented-control input[type="radio"]:checked + label {
+  background: #e91e63;
+  color: #fff;
+  font-weight: 600;
+}
+.segmented-control input[type="radio"]:checked + label:hover { background: #c2185b; }
+.segmented-control input[type="radio"]:focus-visible + label {
+  outline: 2px solid #e91e63;
+  outline-offset: -2px;
+}
+/* Custom mode is hidden unless explicitly enabled via the Settings toggle.
+ * The radio input and its label are both hidden together; the input ID
+ * `preset-custom` plus its sibling label `#preset-custom-label` make the
+ * pair easy to flip with the `.custom-enabled` modifier on the container. */
+#preset-segmented #preset-custom,
+#preset-segmented #preset-custom-label {
+  display: none;
+}
+#preset-segmented.custom-enabled #preset-custom {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  display: block;
+}
+#preset-segmented.custom-enabled #preset-custom-label {
+  display: block;
+}
+
+/* ============ Settings toggle (Custom enable / disable) ============ */
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  margin-bottom: 6px;
+}
+.settings-toggle input[type="checkbox"] { accent-color: #e91e63; }
+
+/* ============ Route endpoint rows (swap + per-input X) ============ */
+/* Mirrors .settings-loc-row styling for the X buttons so the routing
+ * panel matches the Home/Work editor in the Settings modal. */
+
+.route-endpoints-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px;
+  align-items: center;
+}
+.route-endpoints-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+#swap-endpoints {
+  background: #f7f7f7;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  cursor: pointer;
+  width: 22px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  padding: 0;
+  flex-shrink: 0;
+}
+#swap-endpoints:hover { background: #ececec; color: #222; }
+#swap-endpoints .material-symbols-outlined { font-size: 16px; }
+
+.route-loc-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 6px;
+}
+.route-loc-row .addr-input-wrap { margin: 3px 0; }
+.route-loc-row button {
+  background: none;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.route-loc-row button:hover { background: #f0f0f0; color: #b03030; }
+.route-loc-row button .material-symbols-outlined { font-size: 16px; }
+
+/* ============ Settings gear (lives in #app-header) ============ */
+
+#open-settings {
   font-size: 11px;
-  padding: 4px;
+  padding: 0;
+  width: 28px;
+  height: 28px;
   border: 1px solid #bbb;
   background: #f7f7f7;
   border-radius: 4px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  flex-shrink: 0;
 }
-#controls #clear-route:hover {
-  background: #ececec;
+#open-settings:hover { background: #ececec; color: #222; }
+#open-settings .material-symbols-outlined { font-size: 18px; }
+
+/* Crosshair cursor during click-to-place mode. No banner; pressing Escape
+ * cancels (see ui.js wireGlobalChooseInteractions). */
+.choosing-on-map .maplibregl-canvas { cursor: crosshair !important; }
+
+/* ============ Settings modal ============ */
+
+#settings-modal {
+  width: min(540px, 90vw);
+  max-height: 85vh;
+  border: none;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  padding: 0;
+  font-size: 13px;
+  color: #222;
+}
+#settings-modal::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+#settings-modal header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #eee;
+}
+#settings-modal h2 { margin: 0; font-size: 16px; }
+#settings-modal h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #555;
+}
+#settings-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  padding: 4px;
+  display: inline-flex;
+}
+#settings-close:hover { color: #222; }
+#settings-close .material-symbols-outlined { font-size: 22px; }
+
+.settings-section { padding: 12px 16px; border-bottom: 1px solid #f0f0f0; }
+.settings-section:last-child { border-bottom: none; }
+.settings-hint { color: #777; font-size: 11px; margin: 0 0 8px; }
+
+.settings-loc-row {
+  display: grid;
+  grid-template-columns: 60px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.settings-loc-row label { font-weight: 500; }
+.settings-loc-row button {
+  background: none;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.settings-loc-row button:hover { background: #f0f0f0; color: #b03030; }
+.settings-loc-row button .material-symbols-outlined { font-size: 16px; }
+.settings-loc-row .addr-input-wrap { margin: 0; }
+
+.attrib-list { margin: 0; padding-left: 18px; font-size: 11.5px; color: #555; }
+.attrib-list li { margin-bottom: 2px; }
+.attrib-list a { color: #1e88e5; text-decoration: none; }
+.attrib-list a:hover { text-decoration: underline; }
+
+/* ============ Custom sliders (inside settings modal) ============ */
+
+#custom-sliders { display: flex; flex-direction: column; gap: 6px; }
+/* When Custom is disabled in Settings, keep the sliders visible (so users
+ * can see what they'd get) but gray them out and block interaction. */
+#custom-sliders.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+  filter: grayscale(0.5);
+}
+.slider-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 0 8px;
+}
+.slider-row .slider-label { grid-column: 1; grid-row: 1; font-size: 12px; color: #333; }
+.slider-row .slider-val {
+  grid-column: 2; grid-row: 1;
+  font-size: 11px; color: #666;
+  min-width: 28px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.slider-row input[type="range"] {
+  grid-column: 1 / span 2; grid-row: 2;
+  width: 100%; margin: 0; accent-color: #e91e63;
 }
 
-#directions-panel {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  z-index: 1;
-  background: rgba(255, 255, 255, 0.96);
-  padding: 10px 12px;
-  border-radius: 6px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-  font-size: 12px;
-  max-width: 280px;
-  max-height: calc(100% - 40px);
-  overflow-y: auto;
-}
+/* ============ Directions panel ============ */
 
 .route-loading, .route-error, .route-hint {
   margin: 0;
@@ -118,83 +473,114 @@ body {
 }
 .route-error { color: #b03030; }
 
+/* Tab strip — shown only when there's >1 route. Each tab swaps which
+ * route is the primary pink line on the map and shows that route's
+ * step list. */
+.route-tabs {
+  list-style: none;
+  margin: 0 -10px 8px;
+  padding: 0;
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid #e3e3e3;
+}
+.route-tab {
+  flex: 1;
+  padding: 6px 6px 8px;
+  cursor: pointer;
+  text-align: center;
+  border-bottom: 2px solid transparent;
+  color: #555;
+  font-size: 11px;
+  line-height: 1.25;
+}
+.route-tab:hover { background: #fce4ec; }
+.route-tab .route-tab-name { font-weight: 600; }
+.route-tab .route-tab-mi   { color: #888; font-variant-numeric: tabular-nums; }
+.route-tab .route-tab-pct {
+  color: #777;
+  font-size: 10px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
+.route-tab.active .route-tab-pct { color: #ad1457; }
+.route-summary .route-summary-pct {
+  color: #555;
+  font-size: 11px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+.route-tab.active {
+  color: #ad1457;
+  border-bottom-color: #e91e63;
+  background: rgba(233, 30, 99, 0.06);
+}
+
 .route-summary {
   font-size: 13px;
   margin-bottom: 8px;
   padding-bottom: 6px;
   border-bottom: 1px solid #eee;
 }
-.route-summary b {
-  font-size: 15px;
-  color: #1f6b3d;
-}
-.route-meta {
-  display: block;
-  font-size: 10px;
-  color: #888;
-  margin-top: 2px;
-}
+.route-summary b { font-size: 15px; color: #1f6b3d; }
+.route-meta { display: block; font-size: 10px; color: #888; margin-top: 2px; }
 
 .route-steps {
-  margin: 0;
-  padding: 0;
+  margin: 0; padding: 0;
   list-style: none;
   counter-reset: step;
 }
 .route-step {
   counter-increment: step;
   position: relative;
-  padding: 6px 0 6px 24px;
+  padding: 6px 0 6px 30px;   /* room for the 24px marker + 6px gap */
   border-bottom: 1px solid #f0f0f0;
 }
 .route-step:last-child { border-bottom: none; }
+/* Step-number badge — design shared between turn-by-turn list items
+ * (via ::before pseudo-element) and on-map markers (.route-step-marker).
+ * Keep both rules synchronized. */
+.route-step::before, .route-step-marker {
+  box-sizing: border-box;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: #e91e63;
+  color: #ffffff;
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
 .route-step::before {
   content: counter(step);
   position: absolute;
-  left: 0;
-  top: 6px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #7e3ff2;
-  color: white;
-  font-size: 10px;
-  text-align: center;
-  line-height: 18px;
+  left: 0; top: 4px;
+  line-height: 20px;   /* 24px outer − 2px*2 border = 20px content */
 }
-.route-step-instruction {
-  font-weight: 500;
-  color: #222;
-  line-height: 1.3;
-}
-.route-step-distance {
-  font-size: 11px;
-  color: #888;
-  margin-top: 2px;
-}
-.route-step-annotation {
-  font-size: 11px;
-  color: #b06000;
-  font-style: italic;
-  margin-top: 2px;
-  line-height: 1.3;
-}
-
-/* Numbered step markers overlaid on the route line. Matches the panel
-   counter styling so the user can map a number on the map to its
-   instruction in the panel. */
 .route-step-marker {
-  background: #7e3ff2;
-  color: #ffffff;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 600;
-  border: 2px solid #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  display: flex; align-items: center; justify-content: center;
   cursor: default;
 }
+.route-step-instruction { font-weight: 500; color: #222; line-height: 1.3; }
+.route-step-distance { font-size: 11px; color: #888; margin-top: 2px; }
+.route-step-annotation { font-size: 11px; color: #b06000; font-style: italic; margin-top: 2px; line-height: 1.3; }
+
+.route-alt-label {
+  background: #ffffff;
+  color: #ad1457;
+  padding: 3px 7px;
+  border-radius: 12px;
+  border: 1.5px solid #f48fb1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.route-alt-label:hover { background: #fce4ec; }
+.route-alt-meta { color: #888; font-size: 9px; }

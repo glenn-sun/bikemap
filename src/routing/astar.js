@@ -4,6 +4,10 @@
 //
 // Heuristic: haversine distance to goal (ft) × min multiplier (1.0).
 // Admissible because no edge costs less per foot than its raw length.
+//
+// All cost functions take a `weights` object as their first argument, so
+// the caller can run several A* searches with different weight sets to
+// produce alternative routes without disturbing any global state.
 
 import { edgeCostFt, turnPenaltyFt, crossingPenaltyFt } from './cost.js';
 
@@ -67,14 +71,14 @@ class MinHeap {
 // can be reached / exited via the two endpoints of the matched edge, paying
 // partial-edge cost on each side.
 
-function startEntries(graph, spec) {
+function startEntries(weights, graph, spec) {
   if (spec.kind === 'node') {
     return [{ nodeId: spec.nodeId, baseG: 0, prevBearing: null, prefixGeom: [graph.nodeCoord(spec.nodeId)] }];
   }
   const p = spec.projection;
   const entries = [];
   // Toward the directed edge's `to` node (along the same direction)
-  const fwdMult = edgeCostFt(graph, p.edgeId) / graph.edgeLengthFt(p.edgeId);
+  const fwdMult = edgeCostFt(weights, graph, p.edgeId) / graph.edgeLengthFt(p.edgeId);
   if (Number.isFinite(fwdMult) && p.distFromToFt > 0) {
     entries.push({
       nodeId: p.toNodeId,
@@ -85,7 +89,7 @@ function startEntries(graph, spec) {
   }
   // Toward `from` (requires the reverse-direction edge)
   if (p.reverseEdgeId != null) {
-    const revMult = edgeCostFt(graph, p.reverseEdgeId) / graph.edgeLengthFt(p.reverseEdgeId);
+    const revMult = edgeCostFt(weights, graph, p.reverseEdgeId) / graph.edgeLengthFt(p.reverseEdgeId);
     if (Number.isFinite(revMult) && p.distFromFromFt > 0) {
       entries.push({
         nodeId: p.fromNodeId,
@@ -98,7 +102,7 @@ function startEntries(graph, spec) {
   return entries;
 }
 
-function endExits(graph, spec) {
+function endExits(weights, graph, spec) {
   if (spec.kind === 'node') {
     return {
       goalLon: graph.nodeCoord(spec.nodeId)[0],
@@ -108,11 +112,8 @@ function endExits(graph, spec) {
   }
   const p = spec.projection;
   const exits = new Map();
-  // Enter the projection via the directed edge's `from` -> `to` direction:
-  //   path enters node `from`, then we traverse partial edge to projection.
-  const fwdMult = edgeCostFt(graph, p.edgeId) / graph.edgeLengthFt(p.edgeId);
+  const fwdMult = edgeCostFt(weights, graph, p.edgeId) / graph.edgeLengthFt(p.edgeId);
   if (Number.isFinite(fwdMult) && p.distFromFromFt > 0) {
-    // Suffix geometry runs from `from` -> projection (i.e. away from `from`)
     const fromSlice = graph.sliceProjectionToEndpoint(p, 'from'); // [proj, ..., from]
     const reversedSlice = [...fromSlice].reverse();
     exits.set(p.fromNodeId, {
@@ -120,11 +121,10 @@ function endExits(graph, spec) {
       suffixGeom: reversedSlice,
     });
   }
-  // Enter via the reverse direction: path enters node `to`, traverses reverse partial edge.
   if (p.reverseEdgeId != null) {
-    const revMult = edgeCostFt(graph, p.reverseEdgeId) / graph.edgeLengthFt(p.reverseEdgeId);
+    const revMult = edgeCostFt(weights, graph, p.reverseEdgeId) / graph.edgeLengthFt(p.reverseEdgeId);
     if (Number.isFinite(revMult) && p.distFromToFt > 0) {
-      const toSlice = graph.sliceProjectionToEndpoint(p, 'to'); // [proj, ..., to]
+      const toSlice = graph.sliceProjectionToEndpoint(p, 'to');
       const reversedSlice = [...toSlice].reverse();
       const cur = exits.get(p.toNodeId);
       const candCost = p.distFromToFt * revMult;
@@ -141,37 +141,28 @@ function endExits(graph, spec) {
 }
 
 /**
- * Find the shortest path. startSpec and endSpec each are either
- *   { kind: 'node', nodeId }  OR  { kind: 'edge', projection }.
+ * Find the shortest path under the given `weights`. startSpec/endSpec are
+ *   { kind: 'node', nodeId } OR { kind: 'edge', projection }.
+ *
+ * `penaltyEdgeIds` (optional Set<number>): edge IDs whose cost is
+ *   multiplied by `penaltyMultiplier` during this run. Used by the
+ *   penalize-and-rerun fallback to coax a visually distinct alternate.
  *
  * Returns { pathEdgeIds, pathNodeIds, totalCostFt, totalLengthFt,
  *           prefixGeom, suffixGeom } or null.
- *
- * prefixGeom/suffixGeom are the partial-edge geometry pieces from the
- * projection point to/from the first/last graph node visited (empty when
- * the spec was 'node').
  */
-export function findPath(graph, startSpec, endSpec) {
-  const starts = startEntries(graph, startSpec);
-  const { goalLon, goalLat, exits } = endExits(graph, endSpec);
+export function findPath(weights, graph, startSpec, endSpec,
+                         penaltyEdgeIds = null, penaltyMultiplier = 1.5) {
+  const starts = startEntries(weights, graph, startSpec);
+  const { goalLon, goalLat, exits } = endExits(weights, graph, endSpec);
   if (starts.length === 0 || exits.size === 0) return null;
-
-  // If start projection == end projection, return a degenerate route.
-  if (startSpec.kind === 'edge' && endSpec.kind === 'edge'
-      && startSpec.projection.edgeId === endSpec.projection.edgeId) {
-    // Same edge — route is just the segment between the two projections.
-    // Punt: route to the nearest endpoint and back. Cost is small; A* handles.
-  }
 
   const bestG = new Map();
   const cameFrom = new Map();
-  const startKey = (e) => `S:${e.nodeId}:${e.baseG}`;
 
   const open = new MinHeap();
   for (const entry of starts) {
-    const k = startKey(entry);
     bestG.set(entry.nodeId, Math.min(bestG.get(entry.nodeId) ?? Infinity, entry.baseG));
-    // Remember which start entry led here, for prefix reconstruction.
     cameFrom.set(entry.nodeId, { from: null, edge: null, startEntry: entry });
     const [lon, lat] = graph.nodeCoord(entry.nodeId);
     const h = haversineFt(lon, lat, goalLon, goalLat);
@@ -188,7 +179,6 @@ export function findPath(graph, startSpec, endSpec) {
     const cur = open.pop();
     if (cur.g > (bestG.get(cur.node) ?? Infinity)) continue;
 
-    // Check if cur.node is an exit; total = cur.g + exit.suffixCost
     if (exits.has(cur.node)) {
       const exit = exits.get(cur.node);
       return reconstruct(graph, cameFrom, cur.node, cur.g + exit.suffixCost, exit);
@@ -196,17 +186,19 @@ export function findPath(graph, startSpec, endSpec) {
 
     const outgoing = graph.outgoingEdges(cur.node);
     for (const eid of outgoing) {
-      const edgeBase = edgeCostFt(graph, eid);
+      let edgeBase = edgeCostFt(weights, graph, eid);
       if (!Number.isFinite(edgeBase)) continue;
+      if (penaltyEdgeIds && penaltyEdgeIds.has(eid)) edgeBase *= penaltyMultiplier;
       const toNode = graph.edgeTo(eid);
 
       let stepCost = edgeBase;
       stepCost += turnPenaltyFt(
+        weights,
         cur.prevBearing,
         graph.edgeBearingStart(eid),
         graph.nodeFlags(cur.node),
       );
-      const cross = crossingPenaltyFt(graph, cur.node, cur.prevEdge, eid);
+      const cross = crossingPenaltyFt(weights, graph, cur.node, cur.prevEdge, eid);
       if (!Number.isFinite(cross)) continue;
       stepCost += cross;
 
@@ -246,9 +238,9 @@ function reconstruct(graph, cameFrom, endNodeId, totalCostFt, exit) {
     totalLen += graph.edgeLengthFt(entry.edge);
     cur = entry.from;
   }
-  // totalLen does NOT include the partial-edge pieces; add them so the
-  // displayed mileage includes the mid-block tails.
-  totalLen += (startEntry?.baseG  ?? 0) > 0 ? startEntry.prefixGeom ? distFtOfPolyline(startEntry.prefixGeom) : 0 : 0;
+  totalLen += (startEntry?.baseG ?? 0) > 0
+    ? (startEntry.prefixGeom ? distFtOfPolyline(startEntry.prefixGeom) : 0)
+    : 0;
   if (exit.suffixGeom && exit.suffixGeom.length > 1) totalLen += distFtOfPolyline(exit.suffixGeom);
   return {
     pathEdgeIds: edges,
@@ -266,4 +258,71 @@ function distFtOfPolyline(poly) {
     t += haversineFt(poly[i - 1][0], poly[i - 1][1], poly[i][0], poly[i][1]);
   }
   return t;
+}
+
+// ---------- multi-route wrapper for alternates ----------
+
+/** Compute primary + twist alternates. Returns an array of { id, label,
+ *  weights, result } in order: primary first, then any twist alternates
+ *  that survived the similarity filter.
+ *
+ * Algorithm (verified with owner 2026-05):
+ *   1. Run primary + every twist (always — fixed number of A* runs).
+ *   2. Drop any twist whose route is >`overlapThreshold` similar to the
+ *      primary's route (measured on underlying geometry indices).
+ *   3. If two surviving twists are >`overlapThreshold` similar to each
+ *      other, keep the one less similar to the primary; drop the other.
+ *   4. Surviving twists keep their original label ("Quieter", "More
+ *      direct"). We never fall back to a relabeled "Alternative" — if a
+ *      twist isn't meaningfully different on this route, just omit it.
+ */
+export function findPathsMulti(primaryWeights, graph, startSpec, endSpec,
+                               twistRuns, overlapThreshold = 0.8) {
+  const out = [];
+  const primary = findPath(primaryWeights, graph, startSpec, endSpec);
+  out.push({ id: 'primary', label: 'Primary', weights: primaryWeights, result: primary });
+  if (!primary) return out;
+  const primaryGeomSet = geomSetForPath(graph, primary.pathEdgeIds);
+
+  // Step 1 + 2: compute every twist; keep those distinct from the primary.
+  const survivors = [];
+  for (const t of twistRuns) {
+    const alt = findPath(t.weights, graph, startSpec, endSpec);
+    if (!alt) continue;
+    const geomSet = geomSetForPath(graph, alt.pathEdgeIds);
+    const simToPrimary = jaccardOverlap(geomSet, primaryGeomSet);
+    if (simToPrimary > overlapThreshold) continue;
+    survivors.push({ id: t.id, label: t.label, weights: t.weights,
+                     result: alt, geomSet, simToPrimary });
+  }
+
+  // Step 3: pairwise dedup — if two survivors are too similar to each other,
+  // keep the one LESS similar to the primary (more informative alternate).
+  // Sort by simToPrimary ascending so the most-different twists come first.
+  survivors.sort((a, b) => a.simToPrimary - b.simToPrimary);
+  const kept = [];
+  for (const s of survivors) {
+    if (kept.some((k) => jaccardOverlap(k.geomSet, s.geomSet) > overlapThreshold)) continue;
+    kept.push(s);
+  }
+
+  for (const k of kept) {
+    out.push({ id: k.id, label: k.label, weights: k.weights, result: k.result });
+  }
+  return out;
+}
+
+function geomSetForPath(graph, pathEdgeIds) {
+  const s = new Set();
+  for (const eid of pathEdgeIds) s.add(graph.edgeGeomIndex(eid));
+  return s;
+}
+
+function jaccardOverlap(a, b) {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const v of a) if (b.has(v)) inter++;
+  // Use min-size denominator to detect "alt is a subset of primary" cases
+  // (e.g. trivially-shorter alternates) more aggressively than Jaccard.
+  return inter / Math.min(a.size, b.size);
 }

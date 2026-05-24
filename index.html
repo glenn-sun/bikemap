@@ -3,20 +3,85 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Seattle Bike Map</title>
+    <title>Open Bike Map Seattle</title>
     <link rel="stylesheet" href="/src/style.css" />
+    <!-- Google Material Symbols (variable font; one HTTP request).
+         opsz=24 weight=400 fill=0 grad=0 — neutral default for chrome icons. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=block" />
   </head>
   <body>
     <div id="map"></div>
-    <div id="controls">
+
+    <!-- ============ Top-left stack: routing + directions ============ -->
+    <div id="left-stack">
+      <div id="routing-panel">
+        <header id="app-header">
+          <h1 class="app-title">Open Bike Map Seattle</h1>
+          <button id="open-settings" type="button" aria-label="Settings" title="Settings">
+            <span class="material-symbols-outlined">settings</span>
+          </button>
+        </header>
+        <fieldset id="route-endpoints">
+          <legend>Directions</legend>
+          <div class="route-endpoints-grid">
+            <button id="swap-endpoints" type="button"
+                    aria-label="Swap start and end" title="Swap start and end">
+              <span class="material-symbols-outlined">swap_vert</span>
+            </button>
+            <div class="route-endpoints-rows">
+              <div class="route-loc-row">
+                <div class="addr-input-wrap" data-which="start">
+                  <input id="route-start-input" class="addr-input" type="text"
+                         autocomplete="off" placeholder="Start" />
+                  <ul id="route-start-suggestions" class="addr-suggestions" hidden></ul>
+                </div>
+                <button id="clear-start" type="button"
+                        aria-label="Clear start" title="Clear start">
+                  <span class="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              <div class="route-loc-row">
+                <div class="addr-input-wrap" data-which="end">
+                  <input id="route-end-input" class="addr-input" type="text"
+                         autocomplete="off" placeholder="End" />
+                  <ul id="route-end-suggestions" class="addr-suggestions" hidden></ul>
+                </div>
+                <button id="clear-end" type="button"
+                        aria-label="Clear end" title="Clear end">
+                  <span class="material-symbols-outlined">close</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </fieldset>
+        <fieldset id="route-style">
+          <legend>Riding style</legend>
+          <div class="segmented-control" id="preset-segmented" role="radiogroup" aria-label="Riding style">
+            <input type="radio" name="route-preset" id="preset-comfort" value="comfort" checked />
+            <label for="preset-comfort" title="Greenways &amp; PBLs — prioritize comfort over directness">Comfort</label>
+            <input type="radio" name="route-preset" id="preset-athletic" value="athletic" />
+            <label for="preset-athletic" title="Direct — accept less-comfortable infrastructure for speed">Athletic</label>
+            <input type="radio" name="route-preset" id="preset-custom" value="custom" />
+            <label for="preset-custom" id="preset-custom-label" title="Tune the sliders in Settings">Custom</label>
+          </div>
+        </fieldset>
+      </div>
+      <div id="directions-panel" hidden></div>
+    </div>
+
+    <!-- ====== Top-right (LEFT of zoom): layers visibility ====== -->
+    <div id="layers-panel">
       <fieldset>
         <legend>Bike infrastructure</legend>
-        <label><input type="checkbox" id="toggle-aaa" checked /> All ages &amp; abilities (dark green)</label>
+        <label><input type="checkbox" id="toggle-aaa" checked /> All ages &amp; abilities</label>
         <label><input type="checkbox" id="toggle-bbl" checked /> Buffered bike lanes</label>
         <label><input type="checkbox" id="toggle-bl" checked /> Standard bike lanes</label>
-        <label><input type="checkbox" id="toggle-sharrows" checked /> Sharrows / climbing lanes</label>
+        <label><input type="checkbox" id="toggle-sharrows" checked /> Sharrows / climbing</label>
         <label><input type="checkbox" id="toggle-planned" /> Planned (gray dotted)</label>
-        <label><input type="checkbox" id="toggle-construction" /> Under construction (dotted)</label>
+        <label><input type="checkbox" id="toggle-construction" /> Under construction</label>
       </fieldset>
       <fieldset>
         <legend>Points</legend>
@@ -26,15 +91,90 @@
         <label><input type="checkbox" id="toggle-bike-racks" checked /> Bike racks</label>
         <label><input type="checkbox" id="toggle-bike-signs" checked /> Bike signage</label>
       </fieldset>
-      <fieldset>
-        <legend>Routing</legend>
-        <label><input type="checkbox" id="toggle-signals-debug" /> Traffic signals (debug)</label>
-        <label><input type="checkbox" id="toggle-crosswalks-debug" /> Crosswalks (debug)</label>
-        <label><input type="checkbox" id="toggle-beacons-debug" /> Beacons (debug)</label>
-        <button id="clear-route" type="button">Clear route</button>
+      <fieldset id="layers-debug-fieldset" hidden>
+        <legend>Routing debug</legend>
+        <label><input type="checkbox" id="toggle-signals-debug" /> Traffic signals</label>
+        <label><input type="checkbox" id="toggle-crosswalks-debug" /> Crosswalks</label>
+        <label><input type="checkbox" id="toggle-beacons-debug" /> Beacons</label>
+        <label><input type="checkbox" id="toggle-stop-signs-debug" /> Stop signs</label>
+        <label><input type="checkbox" id="toggle-graph-debug" /> Routing graph</label>
       </fieldset>
     </div>
-    <div id="directions-panel" hidden></div>
+
+    <!-- ============ Settings modal ============ -->
+    <dialog id="settings-modal" aria-labelledby="settings-title">
+      <header>
+        <h2 id="settings-title">Settings</h2>
+        <button id="settings-close" type="button" aria-label="Close" title="Close">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </header>
+
+      <section class="settings-section">
+        <h3>Saved locations</h3>
+        <div class="settings-loc-row">
+          <label for="settings-home-input">Home</label>
+          <div class="addr-input-wrap" data-which="home">
+            <input id="settings-home-input" class="addr-input" type="text"
+                   autocomplete="off" placeholder="Type an address…" />
+            <ul id="settings-home-suggestions" class="addr-suggestions" hidden></ul>
+          </div>
+          <button id="clear-home" type="button" title="Clear" aria-label="Clear home">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+        <div class="settings-loc-row">
+          <label for="settings-work-input">Work</label>
+          <div class="addr-input-wrap" data-which="work">
+            <input id="settings-work-input" class="addr-input" type="text"
+                   autocomplete="off" placeholder="Type an address…" />
+            <ul id="settings-work-suggestions" class="addr-suggestions" hidden></ul>
+          </div>
+          <button id="clear-work" type="button" title="Clear" aria-label="Clear work">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Average cycling speed</h3>
+        <p class="settings-hint">Used to estimate the travel time shown next to each route.</p>
+        <label class="slider-row" for="settings-speed-input" title="Your typical riding speed across the route">
+          <span class="slider-label">Speed</span>
+          <span class="slider-val" id="settings-speed-val">10 mph</span>
+          <input type="range" id="settings-speed-input" min="4" max="25" step="1" value="10" />
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Custom route preferences</h3>
+        <label class="settings-toggle" for="settings-custom-enabled">
+          <input type="checkbox" id="settings-custom-enabled" />
+          <span>Enable <b>Custom</b> route style</span>
+        </label>
+        <div id="custom-sliders"></div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Routing debug</h3>
+        <label class="settings-toggle" for="settings-debug-enabled">
+          <input type="checkbox" id="settings-debug-enabled" />
+          <span>Enable routing debug layers</span>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Attributions</h3>
+        <ul class="attrib-list">
+          <li>Search &amp; basemap data &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</li>
+          <li>Bike facilities &amp; signage &copy; <a href="https://www.seattle.gov/transportation" target="_blank" rel="noopener">Seattle SDOT</a></li>
+          <li>Regional trails &copy; <a href="https://kingcounty.gov" target="_blank" rel="noopener">King County</a></li>
+          <li>Basemap tiles by <a href="https://protomaps.com" target="_blank" rel="noopener">Protomaps</a></li>
+          <li>Icons &copy; <a href="https://fonts.google.com/icons" target="_blank" rel="noopener">Google Material Symbols</a></li>
+        </ul>
+      </section>
+    </dialog>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

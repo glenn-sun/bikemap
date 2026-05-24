@@ -136,6 +136,16 @@ LAYERS: list[Layer] = [
         where="CURRENT_STATUS = 'INSVC'",
         out_fields="UNITDESC,CATEGORY",
     ),
+    # Stop signs (MUTCD R1-1). Used in build_graph.py to suppress the
+    # unsignalized-crossing penalty when the cross-traffic is stopped.
+    # FACING is the cardinal direction the sign physically faces — i.e.,
+    # the bearing of approaching traffic that sees and stops at it.
+    Layer(
+        "stop_signs",
+        f"{SDOT}/SDOT_Street_Signs/FeatureServer/1",
+        where="SIGNTYPE = 'R1-1' AND CURRENT_STATUS = 'INSVC'",
+        out_fields="FACING,INTKEY,UNITDESC",
+    ),
     # Neighborhood traffic circles — collapsed to single nodes during graph
     # build so a left turn around the circle counts as one turn.
     Layer(

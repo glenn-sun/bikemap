@@ -48,6 +48,18 @@ class Graph {
     };
   }
 
+  // True iff this node has a stop sign whose FACING covers approaching
+  // traffic traveling at `bearingDeg`. Bits 4..11 of the node flag word
+  // hold one bit per 45° cardinal sector (N, NE, E, SE, S, SW, W, NW),
+  // populated from SDOT's stop-sign FACING attribute in build_graph.py.
+  // SDOT FACING is the direction the sign physically points = the bearing
+  // approaching traffic travels (e.g. FACING='E' stops eastbound traffic).
+  hasStopFacing(id, bearingDeg) {
+    const f = this.n.flags[id];
+    const sector = Math.round((((bearingDeg % 360) + 360) % 360) / 45) % 8;
+    return ((f >> (4 + sector)) & 1) !== 0;
+  }
+
   outgoingEdges(nodeId) {
     return this.n.edges[nodeId];
   }
@@ -99,6 +111,7 @@ class Graph {
     const i = this.e.name[id];
     return i >= 0 ? this.names[i] : null;
   }
+  edgeGeomIndex(id)     { return this.e.geom[id]; }
 
   // ---------- nearest-node + nearest-edge spatial indexes ----------
   // Uniform-grid index over (lon, lat). Cell ~0.0008 deg ≈ 60-80 m at
@@ -139,7 +152,62 @@ class Graph {
         bucket.push(i);
       }
     }
+    this._buildConnectedComponents();
   }
+
+  // Weakly-connected components on the directed graph (treat edges as
+  // undirected for reachability — A* will use directions later). Each node
+  // gets a `_nodeComp` id; each component has a size in `_compSize`. The
+  // largest component covers ~99% of nodes in a well-built graph; tiny
+  // residual components are typically park-only trail loops or isolated
+  // service-road islands that shouldn't be used as routing endpoints.
+  _buildConnectedComponents() {
+    const N = this.nodeCount;
+    this._nodeComp = new Int32Array(N).fill(-1);
+    this._compSize = [];
+    // Build symmetric adjacency from directed edges.
+    const adj = Array.from({ length: N }, () => []);
+    for (let i = 0; i < this.e.from.length; i++) {
+      adj[this.e.from[i]].push(this.e.to[i]);
+      adj[this.e.to[i]].push(this.e.from[i]);
+    }
+    // Iterative BFS for each unvisited node.
+    let next = 0;
+    const queue = new Int32Array(N);
+    for (let start = 0; start < N; start++) {
+      if (this._nodeComp[start] !== -1) continue;
+      const cid = next++;
+      let qHead = 0, qTail = 0;
+      queue[qTail++] = start;
+      this._nodeComp[start] = cid;
+      let size = 0;
+      while (qHead < qTail) {
+        const v = queue[qHead++]; size++;
+        for (const u of adj[v]) {
+          if (this._nodeComp[u] === -1) {
+            this._nodeComp[u] = cid;
+            queue[qTail++] = u;
+          }
+        }
+      }
+      this._compSize.push(size);
+    }
+    // Identify the largest component — endpoints in components smaller than
+    // a threshold are considered "untoutable" for snap-from purposes.
+    let largest = 0;
+    for (let i = 1; i < this._compSize.length; i++) {
+      if (this._compSize[i] > this._compSize[largest]) largest = i;
+    }
+    this._mainCompId = largest;
+  }
+
+  /** Component id for a node (0-indexed). Two nodes are reachable from each
+   *  other (undirected) iff they share a component id. */
+  nodeComponent(id) { return this._nodeComp[id]; }
+  /** Size of a node's connected component. */
+  nodeComponentSize(id) { return this._compSize[this._nodeComp[id]]; }
+  /** Component id of the largest connected subgraph. */
+  mainComponent() { return this._mainCompId; }
 
   _cellKey(lon, lat) {
     const cx = Math.floor(lon / this._cell);
@@ -150,35 +218,29 @@ class Graph {
   findNearestNode(lon, lat) {
     const cx = Math.floor(lon / this._cell);
     const cy = Math.floor(lat / this._cell);
+    const main = this._mainCompId;
     let bestId = -1, bestDistSq = Infinity;
+    const consider = (id) => {
+      if (this._nodeComp[id] !== main) return;     // skip island nodes
+      const dLon = this.n.lon[id] - lon;
+      const dLat = this.n.lat[id] - lat;
+      const dsq  = dLon * dLon + dLat * dLat;
+      if (dsq < bestDistSq) { bestDistSq = dsq; bestId = id; }
+    };
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
         const bucket = this._grid.get((cx + dx) + ',' + (cy + dy));
-        if (!bucket) continue;
-        for (const id of bucket) {
-          const dLon = this.n.lon[id] - lon;
-          const dLat = this.n.lat[id] - lat;
-          const dsq  = dLon * dLon + dLat * dLat;
-          if (dsq < bestDistSq) {
-            bestDistSq = dsq; bestId = id;
-          }
-        }
+        if (bucket) for (const id of bucket) consider(id);
       }
     }
-    // Expand search if nothing found in the 3x3 — fall back to 5x5.
     if (bestId < 0) {
-      for (let dx = -2; dx <= 2; dx++) {
-        for (let dy = -2; dy <= 2; dy++) {
-          if (Math.abs(dx) < 2 && Math.abs(dy) < 2) continue;
-          const bucket = this._grid.get((cx + dx) + ',' + (cy + dy));
-          if (!bucket) continue;
-          for (const id of bucket) {
-            const dLon = this.n.lon[id] - lon;
-            const dLat = this.n.lat[id] - lat;
-            const dsq  = dLon * dLon + dLat * dLat;
-            if (dsq < bestDistSq) {
-              bestDistSq = dsq; bestId = id;
-            }
+      // Expand to 5x5 then 9x9 if needed.
+      for (let r = 2; r <= 4 && bestId < 0; r++) {
+        for (let dx = -r; dx <= r; dx++) {
+          for (let dy = -r; dy <= r; dy++) {
+            if (Math.abs(dx) < r && Math.abs(dy) < r) continue;
+            const bucket = this._grid.get((cx + dx) + ',' + (cy + dy));
+            if (bucket) for (const id of bucket) consider(id);
           }
         }
       }
@@ -210,7 +272,13 @@ class Graph {
     let bestSegIdx = 0, bestT = 0;
     let bestProjLon = 0, bestProjLat = 0;
 
+    const mainComp = this._mainCompId;
     const tryEdge = (eid) => {
+      // Filter to edges in the main connected component. Tiny isolated
+      // clusters (e.g. an OSM-tagged park trail loop disconnected from the
+      // street network) would otherwise become snap targets and produce
+      // unreachable routes.
+      if (this._nodeComp[this.e.from[eid]] !== mainComp) return;
       const gIdx = this.e.geom[eid];
       const geom = this.geoms[gIdx];
       for (let i = 1; i < geom.length; i++) {

@@ -1,126 +1,207 @@
-// Bike-comfort cost function. All constants exported so a future slider UI
-// can mutate them in place without touching the rest of the engine.
+// Bike-comfort cost function.
 //
-// Per-edge cost (feet, equivalent distance) = lengthFt × multiplier(edge).
+// All cost-function knobs live in a `weights` object built from a small set
+// of user-facing slider values (s1..s5). The five sliders map to many raw
+// constants via the formulas in `weightsFromSliders` below.
+//
+// Per-edge cost (feet, equivalent distance) = lengthFt × multiplier(weights, edge).
 // Crossing penalty and turn penalty are added in feet at the node level by
-// the A* expansion (see astar.js). Sign coverage is layered post-route in
-// signCoverage.js.
+// the A* expansion. Sign coverage is layered post-route in signCoverage.js.
+//
+// Twists ("Quieter", "More direct") shift the active sliders by small deltas
+// and produce a sibling route under the same overall preset.
 
-// ---------- per-edge facility multipliers ----------
-// multiplier = base + slope * max(0, lanes - threshold)
-// AAA tier (NGW / PBL / OFFST) is flat at 1.0 regardless of lanes.
-export const FACILITY_BASE = {
-  'BKF-NGW':   1.0, 'BKF-PBL':   1.0, 'BKF-OFFST': 1.0,
-  'BKF-BBL':   1.3,
-  'BKF-BL':    1.5,
-  'BKF-CLMB':  2.0, 'BKF-SHW':   2.0,
+// ---------- preset slider values ----------
+//
+// Sliders all live in [0, 1]. Higher = stronger preference for the
+// property named in the slider label (better infra, fewer turns,
+// protected crossings, narrower streets, flatter terrain). Comfort is
+// the "stay on greenways and protected crossings even if longer"
+// persona; Athletic is the "directness first" persona — both keep s2
+// (turn aversion) at 0.5 so directness vs. comfort is decided by
+// infrastructure choice and crossing avoidance, not by zigzag-vs-not.
+export const PRESETS = {
+  athletic: { s1: 0.2, s2: 0.5, s3: 0.2, s4: 0.2, s5: 0.2 },
+  comfort:  { s1: 0.7, s2: 0.5, s3: 0.7, s4: 0.7, s5: 0.7 },
 };
-export const FACILITY_LANE_SLOPE = {
-  'BKF-NGW':   0.0, 'BKF-PBL':   0.0, 'BKF-OFFST': 0.0,
-  'BKF-BBL':   0.3,
-  'BKF-BL':    0.5,
-  'BKF-CLMB':  0.5, 'BKF-SHW':   0.5,
-};
-export const FACILITY_LANE_THRESHOLD = 3.0;
 
-// No bike facility on the segment.
-export const NONE_NO_CENTERLINE = 1.8;
-export const NONE_WITH_CENTERLINE_BASE = 2.5;
-export const NONE_WITH_CENTERLINE_LANE_SLOPE = 0.8;
+// Sign-coverage cap is set per preset (it doesn't have its own slider —
+// the 5-slider cap is already saturated, and most users don't have an
+// opinion on bike-sign coverage). 
+const SIGN_COV_BY_PRESET = { athletic: 0.5, comfort: 0.5, custom: 0.5 };
 
-// Turn penalty: 200 ft per turn > 30°. Traffic-circle traversal counts once.
-export const TURN_THRESHOLD_DEG = 30;
-export const TURN_PENALTY_FT = 200;
-
-// Sign coverage: snap signs within 50 ft of the route, then penalize the
-// fraction of route distance whose nearest sign is > 0.25 mi away (along
-// the route). Multiplier is additive on top of route's per-edge cost.
-export const SIGN_SNAP_THRESHOLD_FT = 50;
-export const SIGN_GAP_THRESHOLD_FT  = 1320;     // 0.25 mi
-export const SIGN_COVERAGE_MAX_MULTIPLIER = 0.3;
-
-// Crossing penalty (ft) at a node, piecewise-linear in fractional `lanes`
-// of the cross street. Anchors per the plan; >5 lanes blocked unless the
-// node has signal / crosswalk / beacon (then zero).
-const CROSSING_ANCHORS = [
-  [1, 0],
-  [2, 400],
-  [3, 800],
-  [4, 1600],
-  [5, 1600],
+// Slider metadata for the UI (label + tooltip). Order here = display order.
+export const SLIDERS = [
+  { key: 's1', label: 'Prefer better bike infrastructure' },
+  { key: 's2', label: 'Prefer fewer turns' },
+  { key: 's3', label: 'Prefer protected crossings' },
+  { key: 's4', label: 'Prefer narrower streets'},
+  { key: 's5', label: 'Prefer flatter terrain (coming soon)' },
 ];
-export function crossingPenaltyByLanes(lanes) {
-  if (lanes <= CROSSING_ANCHORS[0][0]) return 0;
-  for (let i = 1; i < CROSSING_ANCHORS.length; i++) {
-    const [lA, pA] = CROSSING_ANCHORS[i - 1];
-    const [lB, pB] = CROSSING_ANCHORS[i];
-    if (lanes <= lB) {
-      if (lB === lA) return pA;
-      const t = (lanes - lA) / (lB - lA);
-      return pA + t * (pB - pA);
-    }
-  }
-  return Infinity;     // > 5 lanes uncontrolled
+
+// Twist definitions for alternate routes. Each twist's deltas are added to
+// the active sliders (then clipped to [0, 1]) before running A*. Tuned so
+// the alternate is forced to use materially different streets without
+// turning into "a different preset."
+export const TWISTS = [
+  { id: 'quieter', label: 'Quieter',     deltas: { s1: +0.3, s3: +0.3, s4: +0.3} },
+  { id: 'direct',  label: 'More direct', deltas: { s1: -0.2, s2: +0.5, s3: -0.2, s4: -0.2 } },
+];
+
+// Fixed (non-tunable) constants. Kept here so the rest of the engine has a
+// single import path. TURN_THRESHOLD_DEG governs step-list verbosity (what
+// counts as a "turn" worth a maneuver) — not a user preference.
+export const TURN_THRESHOLD_DEG = 30;
+
+function clip01(v) { return Math.max(0, Math.min(1, v ?? 0.5)); }
+
+/** Build a full weights object from a slider snapshot.
+ * `signCoverageMax` is supplied externally (per preset).
+ */
+export function weightsFromSliders(s, signCoverageMax = SIGN_COV_BY_PRESET.custom) {
+  const s1 = clip01(s.s1), s2 = clip01(s.s2), s3 = clip01(s.s3),
+        s4 = clip01(s.s4), s5 = clip01(s.s5);
+  return {
+    facBase: {
+      'BKF-NGW': 1.0, 'BKF-PBL': 1.0, 'BKF-OFFST': 1.0,
+      'BKF-BBL':  1.0 + 1.0 * s1,
+      'BKF-BL':   1.0 + 1.5 * s1,
+      'BKF-CLMB': 1.0 + 2.5 * s1, 
+      'BKF-SHW':  1.0 + 2.5 * s1,
+    },
+    facLaneSlope: {
+      'BKF-NGW': 0, 'BKF-PBL': 0, 'BKF-OFFST': 0,
+      'BKF-BBL':  0.5 * s4,
+      'BKF-BL':   1.0 * s4,
+      'BKF-CLMB': 1.0 * s4,
+      'BKF-SHW':  1.0 * s4,
+    },
+    facLaneThreshold: 3.0,
+    noneNoCenterline: 1 + 1.0 * s1,
+    noneCenterlineBase: 1.5 + 2.5 * s1,
+    noneCenterlineLaneSlope: 1.5 * s4,
+    turnPenaltyFt: 500 * s2,             
+    crossingScale: 2 * s3,
+    crossingAnchorsFt: [[1, 0], [2, 400], [3, 800], [4, 1600], [5, 1600]],
+    signSnapFt: 50,
+    signGapFt:  1320,
+    signCoverageMax,
+    hillAversion: s5,                    // STUB — no effect until elevation data lands.
+    sliders: { s1, s2, s3, s4, s5 },     // diagnostic / for UI display
+  };
 }
 
-// ---------- public functions ----------
+/** Weights for a named preset (athletic | comfort). */
+export function weightsForPreset(name) {
+  if (!(name in PRESETS)) throw new Error(`unknown preset: ${name}`);
+  return weightsFromSliders(PRESETS[name], SIGN_COV_BY_PRESET[name]);
+}
+
+/** Weights for the Custom preset: sliders user-controlled. */
+export function weightsForCustom(sliders) {
+  return weightsFromSliders(sliders, SIGN_COV_BY_PRESET.custom);
+}
+
+/** Apply a twist's delta map to a slider snapshot, clipping to [0, 1]. */
+export function applyTwistToSliders(sliders, twistId) {
+  const t = TWISTS.find((x) => x.id === twistId);
+  if (!t) return { ...sliders };
+  const out = { ...sliders };
+  for (const k of Object.keys(t.deltas)) {
+    out[k] = clip01((out[k] ?? 0.5) + t.deltas[k]);
+  }
+  return out;
+}
+
+// ---------- pure cost functions (take a `weights` object) ----------
 
 /** Multiplier on edge length. */
-export function edgeMultiplier(graph, edgeId) {
+export function edgeMultiplier(weights, graph, edgeId) {
   const lanes = graph.edgeLanes(edgeId);
   const cat   = graph.edgeFacility(edgeId);
-  if (cat && cat in FACILITY_BASE) {
-    const base  = FACILITY_BASE[cat];
-    const slope = FACILITY_LANE_SLOPE[cat];
-    return base + slope * Math.max(0, lanes - FACILITY_LANE_THRESHOLD);
+  if (cat && cat in weights.facBase) {
+    const base  = weights.facBase[cat];
+    const slope = weights.facLaneSlope[cat];
+    return base + slope * Math.max(0, lanes - weights.facLaneThreshold);
   }
   // No facility — branch on centerline presence.
-  if (!graph.edgeCenterline(edgeId)) return NONE_NO_CENTERLINE;
-  return NONE_WITH_CENTERLINE_BASE
-       + NONE_WITH_CENTERLINE_LANE_SLOPE * Math.max(0, lanes - FACILITY_LANE_THRESHOLD);
+  if (!graph.edgeCenterline(edgeId)) return weights.noneNoCenterline;
+  return weights.noneCenterlineBase
+       + weights.noneCenterlineLaneSlope
+         * Math.max(0, lanes - weights.facLaneThreshold);
 }
 
 /** Pure edge cost in ft (length × multiplier). Inf for blocked edges. */
-export function edgeCostFt(graph, edgeId) {
-  return graph.edgeLengthFt(edgeId) * edgeMultiplier(graph, edgeId);
+export function edgeCostFt(weights, graph, edgeId) {
+  return graph.edgeLengthFt(edgeId) * edgeMultiplier(weights, graph, edgeId);
 }
 
-/** Turn penalty in ft given the bearing-out of the previous edge and the
- * bearing-in of the next edge. Skips turn cost if the node is a collapsed
- * traffic circle (we charged the turn when entering the circle).
- *
- * `prevBearing` may be null on the first edge of a route (no prior heading).
- */
-export function turnPenaltyFt(prevBearing, nextBearing, nodeFlags) {
+/** Turn penalty in ft. `prevBearing` may be null on the first edge. */
+export function turnPenaltyFt(weights, prevBearing, nextBearing, nodeFlags) {
   if (prevBearing == null) return 0;
-  let delta = Math.abs(((nextBearing - prevBearing + 540) % 360) - 180);
+  const delta = Math.abs(((nextBearing - prevBearing + 540) % 360) - 180);
   if (delta <= TURN_THRESHOLD_DEG) return 0;
-  if (nodeFlags.isTrafficCircle) return 0;  // already charged once
-  return TURN_PENALTY_FT;
+  if (nodeFlags.isTrafficCircle) return 0;
+  return weights.turnPenaltyFt;
 }
 
-/** Crossing penalty in ft at a node, given the prev and next edges and
- * the candidate "cross-street" lane count.
- *
- * Rules:
- *  - Signal / crosswalk / beacon at the node -> 0
- *  - Cross-street lanes <= current-street lanes -> 0
- *  - Cross-street has no centerline -> 0
- *  - Else piecewise function (CROSSING_ANCHORS), Inf above 5 lanes uncontrolled.
- */
-export function crossingPenaltyFt(graph, nodeId, prevEdgeId, nextEdgeId) {
+/** Crossing penalty as a function of cross-street lane count. Returns
+ *  Infinity above the last anchor — the caller will reject the edge. */
+export function crossingPenaltyByLanes(weights, lanes) {
+  const anchors = weights.crossingAnchorsFt;
+  const scale   = weights.crossingScale;
+  if (lanes <= anchors[0][0]) return 0;
+  for (let i = 1; i < anchors.length; i++) {
+    const [lA, pA] = anchors[i - 1];
+    const [lB, pB] = anchors[i];
+    if (lanes <= lB) {
+      if (lB === lA) return pA * scale;
+      const t = (lanes - lA) / (lB - lA);
+      return (pA + t * (pB - pA)) * scale;
+    }
+  }
+  return Infinity;
+}
+
+// How close to perpendicular a cross-edge has to be (in degrees) to be
+// counted as an actual crossing. Smaller = stricter. The cross-edge's
+// axis must be at least PERPENDICULAR_MIN_DEG away from PARALLEL to
+// BOTH the prev and next edges; otherwise it's a continuation/fork
+// along the cyclist's own path (e.g. another segment of the same
+// street), not a perpendicular crossing.
+const PERPENDICULAR_MIN_DEG = 60;
+
+// Axis-distance between two bearings: 0° = parallel/anti-parallel,
+// 90° = perpendicular. (Treats forward and backward as the same axis,
+// since a street's "axis" is undirected.)
+function axisAngleDeg(a, b) {
+  const d = Math.abs(((a - b + 540) % 360) - 180);  // 0..180
+  return d > 90 ? 180 - d : d;
+}
+
+/** Crossing penalty in ft at a node, considering the prev/next edges and
+ *  the candidate cross-street lane count. Zero when there's a signal /
+ *  crosswalk / beacon at the node, OR when cross-traffic on the
+ *  identified cross-street has stop signs on both approach directions
+ *  (i.e. cyclist is on the through-street of a 2-way stop, or it's a
+ *  4-way stop). */
+export function crossingPenaltyFt(weights, graph, nodeId, prevEdgeId, nextEdgeId) {
   const flags = graph.nodeFlags(nodeId);
   if (flags.hasSignal || flags.hasCrosswalk || flags.hasBeacon) return 0;
-  // Walk all edges at this node; pick the cross street as the one with the
-  // most lanes that isn't the prev/next.
   const incident = graph.outgoingEdges(nodeId);
+  // Cyclist's local travel axes — used to filter out fork/continuation
+  // edges that the original wide-lanes-only test wrongly counted as
+  // "cross streets" (most commonly: a same-name OSM way continuation
+  // past a T-junction onto an unnamed connector).
+  const prevBearingEnd = prevEdgeId != null
+    ? graph.edgeBearingEnd(prevEdgeId) : null;
+  const nextBearingStart = graph.edgeBearingStart(nextEdgeId);
+
   let crossLanes = 0;
   let crossHasCenterline = false;
+  let crossBearingStart = 0;
   for (const eid of incident) {
     if (eid === nextEdgeId) continue;
-    // The reverse of prevEdge is the matching outgoing edge from this node
-    // — its `to` is where we came from. Skip both directions of the prev
-    // edge by comparing endpoint sets.
     if (prevEdgeId != null) {
       const prevFrom = graph.edgeFrom(prevEdgeId);
       const prevTo   = graph.edgeTo(prevEdgeId);
@@ -130,17 +211,30 @@ export function crossingPenaltyFt(graph, nodeId, prevEdgeId, nextEdgeId) {
                       || (candFrom === prevFrom && candTo === prevTo);
       if (sameAsPrev) continue;
     }
+    const candBearing = graph.edgeBearingStart(eid);
+    // Perpendicularity gate: must be far from parallel to both prev and
+    // next. Skip if fork/merge-ish along the cyclist's axis.
+    if (axisAngleDeg(candBearing, nextBearingStart) < PERPENDICULAR_MIN_DEG) continue;
+    if (prevBearingEnd != null
+        && axisAngleDeg(candBearing, prevBearingEnd) < PERPENDICULAR_MIN_DEG) continue;
     const lanes = graph.edgeLanes(eid);
     if (lanes > crossLanes) {
       crossLanes = lanes;
       crossHasCenterline = graph.edgeCenterline(eid);
+      crossBearingStart = candBearing;
     }
   }
-  if (crossLanes === 0) return 0;     // no cross street found
+  if (crossLanes === 0) return 0;
   if (!crossHasCenterline) return 0;
   const currentLanes = prevEdgeId != null
     ? Math.max(graph.edgeLanes(prevEdgeId), graph.edgeLanes(nextEdgeId))
     : graph.edgeLanes(nextEdgeId);
   if (crossLanes <= currentLanes) return 0;
-  return crossingPenaltyByLanes(crossLanes);
+  // 2-way / 4-way stop on the cross-street: cross traffic is stopped
+  // in both directions, so cyclist crosses with right-of-way. SDOT
+  // FACING = the bearing that approaching traffic is travelling, so
+  // we check both axes of the cross-street.
+  if (graph.hasStopFacing(nodeId, crossBearingStart)
+      && graph.hasStopFacing(nodeId, crossBearingStart + 180)) return 0;
+  return crossingPenaltyByLanes(weights, crossLanes);
 }

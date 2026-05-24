@@ -320,7 +320,19 @@ def sample_along(line, n=4):
 
 
 def spatial_join_streets(edges, streets_path):
-    """Match SDOT seattle_streets attrs onto each OSM edge."""
+    """Match SDOT seattle_streets attrs onto each OSM edge.
+
+    Off-street trail edges (highway in CYCLEWAY_HIGHWAYS | RESTRICTED_HIGHWAYS)
+    are SKIPPED. At a trail × street intersection the street's centerline
+    runs through the trail's geometry and wins the "nearest-feature within
+    ~15 m" contest, contaminating the trail edge with the street's
+    ONEWAY/lanes/centerline attributes. The most catastrophic symptom
+    we've seen: BGT-on-Corliss at N 35th picked up Corliss's ONEWAY='Y'
+    and severed southbound connectivity on the trail, forcing a half-mile
+    detour for what should be a 16 ft hop. Trails get sdot={} here and
+    fall through to safe off-street defaults later (oneway=False from
+    parse_oneway, has_centerline=False from artclass=0, lane fallback).
+    """
     print("  joining seattle_streets...")
     fc = json.loads(streets_path.read_text())
     feats = []
@@ -335,8 +347,14 @@ def spatial_join_streets(edges, streets_path):
     tree = STRtree(geoms)
     SEARCH_DEG = 0.00015  # ~15 m at Seattle's latitude
 
+    TRAIL_HIGHWAYS = CYCLEWAY_HIGHWAYS | RESTRICTED_HIGHWAYS
     matched = 0
+    skipped_trails = 0
     for e in edges:
+        if e["tags"].get("highway") in TRAIL_HIGHWAYS:
+            e["sdot"] = {}
+            skipped_trails += 1
+            continue
         attrs_per_sample = []
         for pt in sample_along(e["geom"], n=4):
             candidates = tree.query(pt.buffer(SEARCH_DEG))
@@ -360,25 +378,103 @@ def spatial_join_streets(edges, streets_path):
             matched += 1
         else:
             e["sdot"] = {}
-    print(f"    {matched:,} / {len(edges):,} edges matched a SDOT street")
+    print(f"    {matched:,} / {len(edges):,} street edges matched a SDOT street "
+          f"(skipped {skipped_trails:,} off-street trail edges)")
 
 
-def spatial_join_facilities(edges, facilities_path):
-    """Carry bike-facility CATEGORY + MODEL_TYPE onto each OSM edge."""
-    print("  joining bike_facilities...")
-    fc = json.loads(facilities_path.read_text())
+def spatial_join_facilities(edges, data_dir):
+    """Carry bike-facility CATEGORY + MODEL_TYPE onto each OSM edge.
+
+    Pulls from the SAME four GeoJSON sources that render dark-green-AAA on
+    the map, so the visual classification and routing classification stay
+    in sync (this used to use only bike_facilities.geojson, which meant
+    KC trails / SDOT multi-use trails / Bike+ Network "Existing" all
+    rendered as dark green but got the no-facility 1.8× multiplier in
+    routing — most visibly along the Burke-Gilman).
+
+    Sources, in order of authoritativeness:
+      1. bike_facilities.geojson — CATEGORY taken as-is (only INSVC/PLNRECON;
+         UNDERCONS is skipped so an under-construction PBL doesn't get
+         routed as if installed; the road underneath still routes as
+         no-facility, which is what you want today).
+      2. multi_use_trails.geojson — SDOT off-street paths; all tagged
+         BKF-OFFST (no status field on this layer).
+      3. kc_regional_trails.geojson — KC regional trails clipped to
+         Seattle (heavily pre-filtered by the fetch step); BKF-OFFST.
+      4. bike_plus_network.geojson — only "Existing*" categories; mapped
+         to NGW/PBL/OFFST by sub-category. Proposed* is skipped (planned
+         infra isn't built yet).
+
+    All AAA tiers share multiplier 1.0× in cost.js, so within-AAA picks
+    are routing-cost-equivalent; the distinction only matters for popups.
+    """
+    print("  joining facility sources (bike_facilities + multi_use_trails "
+          "+ kc_regional_trails + bike_plus_network Existing)...")
+
     feats = []
     geoms = []
-    for f in fc["features"]:
-        props = f["properties"]
+
+    def _add_source(path, classify):
+        """classify(props) returns (category, model_type) or (None, None) to skip."""
+        if not path.exists():
+            print(f"    warn: {path.name} not found, skipping")
+            return 0
+        fc = json.loads(path.read_text())
+        n_before = len(feats)
+        for f in fc["features"]:
+            props = f["properties"]
+            cat, model = classify(props)
+            if cat is None:
+                continue
+            g = f.get("geometry")
+            if not g:
+                continue
+            g = shape(g)
+            if g.geom_type not in ("LineString", "MultiLineString"):
+                continue
+            for part in (g.geoms if g.geom_type == "MultiLineString" else [g]):
+                # Reuse `feats` as parallel-arrays to geoms: store (cat, model).
+                feats.append((cat, model))
+                geoms.append(part)
+        return len(feats) - n_before
+
+    # Source 1: SDOT bike_facilities — installed (INSVC) or installed-but-
+    # slated-for-upgrade (PLNRECON). UNDERCONS is skipped on purpose.
+    def _classify_bike_facilities(props):
         if props.get("CURRENT_STATUS") not in ("INSVC", "PLNRECON"):
-            continue
-        g = shape(f["geometry"])
-        if g.geom_type not in ("LineString", "MultiLineString"):
-            continue
-        for part in (g.geoms if g.geom_type == "MultiLineString" else [g]):
-            feats.append(props)
-            geoms.append(part)
+            return None, None
+        cat = props.get("CATEGORY")
+        if cat not in ("BKF-NGW", "BKF-PBL", "BKF-OFFST",
+                       "BKF-BBL", "BKF-BL", "BKF-CLMB", "BKF-SHW"):
+            return None, None
+        return cat, props.get("MODEL_TYPE")
+    n1 = _add_source(data_dir / "bike_facilities.geojson", _classify_bike_facilities)
+    print(f"    +{n1:,} from bike_facilities")
+
+    # Source 2: SDOT multi_use_trails — all off-street paths.
+    def _classify_multi_use(props):
+        return "BKF-OFFST", None
+    n2 = _add_source(data_dir / "multi_use_trails.geojson", _classify_multi_use)
+    print(f"    +{n2:,} from multi_use_trails")
+
+    # Source 3: KC regional trails (clipped to Seattle).
+    def _classify_kc(props):
+        return "BKF-OFFST", None
+    n3 = _add_source(data_dir / "kc_regional_trails.geojson", _classify_kc)
+    print(f"    +{n3:,} from kc_regional_trails")
+
+    # Source 4: Bike+ Network — only the Existing* sub-categories; Proposed
+    # is future plans and shouldn't change today's routing.
+    BIKE_PLUS_AAA = {
+        "Existing Bike+ - Non-Arterial": "BKF-NGW",     # neighborhood greenway
+        "Existing Bike+ - Arterial":     "BKF-PBL",     # protected on arterial
+        "Existing Multi-Use Trail":      "BKF-OFFST",   # off-street path
+    }
+    def _classify_bike_plus(props):
+        return BIKE_PLUS_AAA.get(props.get("bike_network_category"), None), None
+    n4 = _add_source(data_dir / "bike_plus_network.geojson", _classify_bike_plus)
+    print(f"    +{n4:,} from bike_plus_network Existing*")
+
     if not geoms:
         for e in edges:
             e["facility_category"] = None
@@ -395,6 +491,7 @@ def spatial_join_facilities(edges, facilities_path):
         "BKF-CLMB": 3, "BKF-SHW": 3,
     }
     matched = 0
+    matched_by_cat: dict[str, int] = {}
     for e in edges:
         best_cat = None
         best_model = None
@@ -402,24 +499,52 @@ def spatial_join_facilities(edges, facilities_path):
             for idx in tree.query(pt.buffer(SEARCH_DEG)):
                 if geoms[idx].distance(pt) > SEARCH_DEG:
                     continue
-                props = feats[idx]
-                cat = props.get("CATEGORY")
+                cat, model = feats[idx]
                 if cat in RANK:
                     if best_cat is None or RANK[cat] < RANK[best_cat]:
                         best_cat = cat
-                        best_model = props.get("MODEL_TYPE")
+                        best_model = model
         e["facility_category"] = best_cat
         e["facility_model_type"] = best_model
         if best_cat:
             matched += 1
+            matched_by_cat[best_cat] = matched_by_cat.get(best_cat, 0) + 1
     print(f"    {matched:,} edges got a bike-facility class")
+    for cat, n in sorted(matched_by_cat.items()):
+        print(f"      {cat}: {n:,}")
 
 
-def snap_control_points(nodes, signals_p, crosswalks_p, beacons_p):
-    """Mark nodes that have a nearby signal / crosswalk / beacon."""
+# 8 cardinal direction codes used by SDOT's FACING field, mapped to a
+# bit index (0..7) and the bearing (degrees, clockwise from north) of
+# the controlled approach. Convention: a stop sign with FACING='E' is
+# physically pointed east, so eastbound traffic (travel bearing 90°)
+# sees it and stops. So the bit index for FACING='E' is keyed by bearing
+# 90° = approaching-traffic travel direction.
+STOP_FACING_BITS = {  # SDOT FACING token  →  (bit-index, bearing of stopped traffic in deg)
+    "N":  (0,   0),
+    "NE": (1,  45),
+    "E":  (2,  90),
+    "SE": (3, 135),
+    "S":  (4, 180),
+    "SW": (5, 225),
+    "W":  (6, 270),
+    "NW": (7, 315),
+}
+
+def snap_control_points(nodes, signals_p, crosswalks_p, beacons_p, stop_signs_p):
+    """Mark nodes that have a nearby signal / crosswalk / beacon /
+    stop sign. Stop signs are also direction-tagged (which approach
+    direction stops) using SDOT's FACING attribute — needed because the
+    crossing penalty zeros out only when the cross-traffic is stopped,
+    not the cyclist."""
     print("  snapping intersection controls...")
-    SEARCH_DEG = 0.00012  # ~12 m
-    flags = {nid: {"sig": False, "xwk": False, "bcn": False}
+    # ~20 m. The previous 12 m was too tight — SDOT typically digitizes
+    # signal heads at the curb, and several real signals on Aurora /
+    # Westlake / arterials fell 13-18 m from the corresponding graph
+    # node, causing spurious unsignalized-crossing penalties.
+    SEARCH_DEG = 0.0002
+    flags = {nid: {"sig": False, "xwk": False, "bcn": False,
+                   "stopBits": 0}
              for nid in nodes}
     node_pts = [Point(lon, lat) for nid, (lon, lat) in nodes.items()]
     node_ids = list(nodes.keys())
@@ -430,7 +555,6 @@ def snap_control_points(nodes, signals_p, crosswalks_p, beacons_p):
         hits = 0
         for f in fc["features"]:
             g = shape(f["geometry"])
-            # Some signal features have multipoint geometry — flatten.
             pts = list(g.geoms) if hasattr(g, "geoms") else [g]
             for pt in pts:
                 for idx in tree.query(pt.buffer(SEARCH_DEG)):
@@ -438,6 +562,38 @@ def snap_control_points(nodes, signals_p, crosswalks_p, beacons_p):
                         flags[node_ids[idx]][key] = True
                         hits += 1
         print(f"    {key}: {hits:,} hits across nodes")
+
+    # Stop signs: OR the FACING bit into EVERY node within radius — same
+    # as the sig/xwk/bcn logic above. Snapping to a single nearest node
+    # is wrong here: OSM models each stop-sign-bearing curb as its own
+    # degree-2 node, ~20-30 ft from the intersection center. "Nearest"
+    # then routes each sign to its own curb node, missing the
+    # intersection center where the route's crossing penalty is
+    # actually evaluated. Spraying to all nearby nodes is benign because
+    # the only place crossingPenaltyFt fires is at multi-way junctions;
+    # curb (degree-2) nodes never have a cross-street and naturally
+    # short-circuit out.
+    fc = json.loads(stop_signs_p.read_text())
+    snapped = 0
+    unknown_facing = 0
+    for f in fc["features"]:
+        facing = (f["properties"].get("FACING") or "").upper().strip()
+        bit_info = STOP_FACING_BITS.get(facing)
+        if bit_info is None:
+            unknown_facing += 1
+            continue
+        bit, _bearing = bit_info
+        g = shape(f["geometry"])
+        pts = list(g.geoms) if hasattr(g, "geoms") else [g]
+        for pt in pts:
+            hit_any = False
+            for idx in tree.query(pt.buffer(SEARCH_DEG)):
+                if node_pts[idx].distance(pt) <= SEARCH_DEG:
+                    flags[node_ids[idx]]["stopBits"] |= (1 << bit)
+                    hit_any = True
+            if hit_any: snapped += 1
+    print(f"    stop: {snapped:,} signs snapped "
+          f"({unknown_facing:,} skipped for missing/unknown FACING)")
 
     return flags
 
@@ -706,12 +862,21 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle, out_
         lon, lat = nodes[nid]
         n_lon.append(round(lon, 6))
         n_lat.append(round(lat, 6))
-        f = control_flags.get(nid) or {"sig": False, "xwk": False, "bcn": False}
+        f = control_flags.get(nid) or {"sig": False, "xwk": False,
+                                       "bcn": False, "stopBits": 0}
+        # Bitfield layout (matches graph.js nodeFlags() / hasStopFacing()):
+        #   bit 0: hasSignal
+        #   bit 1: hasCrosswalk
+        #   bit 2: hasBeacon
+        #   bit 3: isTrafficCircle
+        #   bits 4..11: stop-sign FACING (one bit per cardinal direction,
+        #               in STOP_FACING_BITS order: N, NE, E, SE, S, SW, W, NW).
         flag = 0
         if f["sig"]: flag |= 1
         if f["xwk"]: flag |= 2
         if f["bcn"]: flag |= 4
         if is_circle.get(nid): flag |= 8
+        flag |= (f.get("stopBits", 0) & 0xFF) << 4
         n_flags.append(flag)
 
     # Edge arrays
@@ -805,8 +970,8 @@ def main():
     # parse time via _is_bike_routable, so they never enter the graph and
     # an explicit isAlley flag adds nothing.)
 
-    print("Step E: spatial-join SDOT bike_facilities...")
-    spatial_join_facilities(edges, DATA / "bike_facilities.geojson")
+    print("Step E: spatial-join all AAA-rendered facility sources...")
+    spatial_join_facilities(edges, DATA)
 
     print("Step F: snap intersection-control points to nodes...")
     control_flags = snap_control_points(
@@ -814,6 +979,7 @@ def main():
         DATA / "signals.geojson",
         DATA / "crosswalks.geojson",
         DATA / "beacons.geojson",
+        DATA / "stop_signs.geojson",
     )
 
     print("Step G: detect geometric traffic-circle rings from OSM topology...")
