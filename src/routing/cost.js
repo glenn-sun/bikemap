@@ -36,7 +36,7 @@ export const SLIDERS = [
   { key: 's2', label: 'Prefer fewer turns' },
   { key: 's3', label: 'Prefer protected crossings' },
   { key: 's4', label: 'Prefer narrower streets'},
-  { key: 's5', label: 'Prefer flatter terrain (coming soon)' },
+  { key: 's5', label: 'Prefer flatter terrain' },
 ];
 
 // Twist definitions for alternate routes. Each twist's deltas are added to
@@ -46,6 +46,7 @@ export const SLIDERS = [
 export const TWISTS = [
   { id: 'quieter', label: 'Quieter',     deltas: { s1: +0.3, s3: +0.3, s4: +0.3} },
   { id: 'direct',  label: 'More direct', deltas: { s1: -0.2, s2: +0.5, s3: -0.2, s4: -0.2 } },
+  { id: 'flatter', label: 'Flatter',     deltas: { s5: +0.5 } },
 ];
 
 // Fixed (non-tunable) constants. Kept here so the rest of the engine has a
@@ -80,13 +81,31 @@ export function weightsFromSliders(s, signCoverageMax = SIGN_COV_BY_PRESET.custo
     noneNoCenterline: 1 + 1.0 * s1,
     noneCenterlineBase: 1.5 + 2.5 * s1,
     noneCenterlineLaneSlope: 1.5 * s4,
-    turnPenaltyFt: 500 * s2,             
+    turnPenaltyFt: 500 * s2,
     crossingScale: 2 * s3,
     crossingAnchorsFt: [[1, 0], [2, 400], [3, 800], [4, 1600], [5, 1600]],
     signSnapFt: 50,
     signGapFt:  1320,
     signCoverageMax,
-    hillAversion: s5,                    // STUB — no effect until elevation data lands.
+    // Uphill aversion: each foot of UPHILL gain (downhill contributes
+    // nothing) on an edge adds uphillFt × uphillFtPenalty to its
+    // equivalent-distance cost. At max-s5 a 10-ft climb costs the same
+    // as +400 ft of flat road (a "40× the rise" exchange rate). Strong
+    // enough to swing routes around hills when an alternative exists;
+    // not so strong that a short steep connector loses to long detours
+    // that also climb.
+    uphillFtPenalty: 40 * s5,
+    // Quadratic steepness penalty: penalty term is
+    //     s5 · steepCoeff · Σ_seg(lengthFt · max(0, slope - 0.02)²)
+    // where the sum is precomputed offline as `graph.edgeSteepFt2(eid)`.
+    // The squared term means a 20% segment hurts MUCH more than two
+    // 10% segments of the same combined length — sustained steep grades
+    // are qualitatively worse for a cyclist than mild rolling terrain.
+    // At s5=1, a 100-ft 10% segment adds ~256 ft equivalent (~2.5×
+    // surcharge); a 100-ft 26% segment adds ~2300 ft (~24× its length).
+    // The 2% threshold matches `STEEP_THRESHOLD` baked into
+    // build_elevation.py's per-edge `steepFt2` precompute.
+    steepCoeff:        400 * s5,
     sliders: { s1, s2, s3, s4, s5 },     // diagnostic / for UI display
   };
 }
@@ -131,9 +150,24 @@ export function edgeMultiplier(weights, graph, edgeId) {
          * Math.max(0, lanes - weights.facLaneThreshold);
 }
 
-/** Pure edge cost in ft (length × multiplier). Inf for blocked edges. */
+/** Elevation surcharge in equivalent feet of distance for an edge.
+ *  Two terms:
+ *    1. Linear uphill: total uphillFt × uphillFtPenalty.
+ *    2. Quadratic steepness: precomputed steepFt2 × steepCoeff.
+ *       `steepFt2 = Σ_seg(length · max(0, slope - 0.02)²)` aggregated by
+ *       build_elevation.py so we don't walk the geometry at routing time.
+ *  Downhill segments contribute nothing to either term. */
+export function elevationPenaltyFt(weights, graph, edgeId) {
+  const up = graph.edgeUphillFt(edgeId);
+  return up * weights.uphillFtPenalty
+       + graph.edgeSteepFt2(edgeId) * weights.steepCoeff;
+}
+
+/** Pure edge cost in ft (length × multiplier, + elevation surcharge).
+ *  Inf for blocked edges. */
 export function edgeCostFt(weights, graph, edgeId) {
-  return graph.edgeLengthFt(edgeId) * edgeMultiplier(weights, graph, edgeId);
+  const base = graph.edgeLengthFt(edgeId) * edgeMultiplier(weights, graph, edgeId);
+  return base + elevationPenaltyFt(weights, graph, edgeId);
 }
 
 /** Turn penalty in ft. `prevBearing` may be null on the first edge. */

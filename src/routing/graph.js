@@ -26,6 +26,11 @@ class Graph {
     this.facs  = raw.facilities;
     this.models = raw.modelTypes;
     this.geoms = raw.geoms;
+    // Per-geom elevation profiles (parallel to geoms; one float-per-point
+    // in raw geometry orientation). Added by scripts/build_elevation.py.
+    // Older graphs without elevation simply omit this field; the routing
+    // engine then treats elevation as zero everywhere.
+    this.geomElevs = raw.geomElevs || null;
     this.n = raw.nodes;
     this.e = raw.edges;
     this._buildIndex();
@@ -33,9 +38,14 @@ class Graph {
 
   get nodeCount() { return this.n.lon.length; }
   get edgeCount() { return this.e.from.length; }
+  get hasElevation() { return this.geomElevs != null; }
 
   nodeCoord(id) {
     return [this.n.lon[id], this.n.lat[id]];
+  }
+
+  nodeElev(id) {
+    return this.n.elev ? this.n.elev[id] : 0;
   }
 
   nodeFlags(id) {
@@ -102,6 +112,66 @@ class Graph {
   edgeFacility(id) {
     const i = this.e.facility[id];
     return i >= 0 ? this.facs[i] : null;
+  }
+  edgeIsBridge(id)      { return (this.e.flags[id] & 4) !== 0; }
+  edgeIsTunnel(id)      { return (this.e.flags[id] & 8) !== 0; }
+  edgeIsCovered(id)     { return (this.e.flags[id] & 16) !== 0; }
+  edgeIsIndoor(id)      { return (this.e.flags[id] & 32) !== 0; }
+  /** OSM `embankment=yes` — way runs on a raised earthwork. DTM is
+   *  generally correct here (earthworks are part of the terrain), but
+   *  the tag is informational and feeds approach detection. */
+  edgeIsEmbankment(id)  { return (this.e.flags[id] & 256) !== 0; }
+  /** OSM `cutting=yes` — way runs below natural ground level in a cut.
+   *  Same DTM-correct semantics as embankment. */
+  edgeIsCutting(id)     { return (this.e.flags[id] & 512) !== 0; }
+  /** Derived flag: this edge geometrically crosses another way-segment on
+   *  the 2D plane without sharing a node, AND has no elevation tag of its
+   *  own. The other edge in the pair may or may not be tagged. Set in
+   *  build_graph.py's detect_untagged_crossings(). */
+  edgeIsUntaggedCrossing(id) { return (this.e.flags[id] & 64) !== 0; }
+  /** Derived flag: this untagged edge is within ~200 ft graph-walk
+   *  distance of a tagged (bridge/tunnel/layered/covered/indoor) edge.
+   *  Approach ramps where OSM didn't tag the elevation transition.
+   *  See `edgeApproachOf(id)` for the nearest source category. */
+  edgeIsApproach(id) { return (this.e.flags[id] & 128) !== 0; }
+  /** OSM `layer=*` value as signed int, or null when unset. Returns null
+   *  if the graph predates the layer column. */
+  edgeLayer(id) {
+    return this.e.layer ? this.e.layer[id] : null;
+  }
+  /** Nearest tagged-source category for approach edges. Returns one of
+   *  "bridge" / "tunnel" / "layered" / "covered" / "indoor", or null
+   *  when this edge is not flagged as an approach. */
+  edgeApproachOf(id) {
+    return this.e.approachOf ? this.e.approachOf[id] : null;
+  }
+
+  /** Total uphill rise (ft) along this directed edge. Computed offline
+   *  in build_elevation.py from the smoothed per-geom elevation profile.
+   *  Returns 0 if the graph has no elevation data. */
+  edgeUphillFt(id) {
+    return this.e.uphillFt ? this.e.uphillFt[id] : 0;
+  }
+  /** Maximum uphill gradient (fraction) on any sub-segment of this
+   *  directed edge. 0.05 = 5%. Capped at ~30% by the build pipeline. */
+  edgeMaxUphillPct(id) {
+    return this.e.maxUphillPct ? this.e.maxUphillPct[id] : 0;
+  }
+  /** Precomputed quadratic-steepness metric:
+   *  Σ over uphill sub-segments of (length_ft · max(0, slope - 0.02)²).
+   *  Drives the quadratic steepness term in cost.js — `cost ∝ steepFt2 · s5`.
+   *  Returns 0 if the graph has no elevation data. */
+  edgeSteepFt2(id) {
+    return this.e.steepFt2 ? this.e.steepFt2[id] : 0;
+  }
+  /** Elevation profile (array of feet) along this directed edge, oriented
+   *  in the direction of travel. Parallel to the edge's geometry coordinates.
+   *  Returns null if the graph has no elevation data. */
+  edgeElevProfile(id) {
+    if (!this.geomElevs) return null;
+    const gIdx = this.e.geom[id];
+    const profile = this.geomElevs[gIdx];
+    return this.e.geomRev[id] ? [...profile].reverse() : profile;
   }
   edgeModelType(id) {
     const i = this.e.model[id];

@@ -72,10 +72,19 @@ def load_seattle_polygon():
     return shape(data["features"][0]["geometry"])
 
 
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://z.overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+
+
 def fetch_overpass(bbox):
     """Pull all bike-routable highway ways within bbox and their nodes.
 
-    bbox = (minLon, minLat, maxLon, maxLat). Overpass wants S,W,N,E."""
+    bbox = (minLon, minLat, maxLon, maxLat). Overpass wants S,W,N,E.
+    Retries across multiple Overpass mirrors on 5xx / timeout."""
     s, w, n, e = bbox[1], bbox[0], bbox[3], bbox[2]
     # Filter aggressively at the query so we don't pull I-5 etc.
     q = f"""
@@ -87,15 +96,25 @@ def fetch_overpass(bbox):
     out body;
     """
     print(f"  Overpass query bbox {s:.4f},{w:.4f} -> {n:.4f},{e:.4f}")
-    r = requests.post(
-        "https://overpass-api.de/api/interpreter",
-        data={"data": q},
-        timeout=600,
-        headers={"User-Agent": "bikemap-prototype/0.1"},
-    )
-    r.raise_for_status()
-    body = r.json()
-    return body["elements"]
+    last_err = None
+    for attempt, url in enumerate(OVERPASS_ENDPOINTS, 1):
+        try:
+            print(f"    attempt {attempt}: {url}")
+            r = requests.post(
+                url,
+                data={"data": q},
+                timeout=600,
+                headers={"User-Agent": "bikemap-prototype/0.1"},
+            )
+            r.raise_for_status()
+            return r.json()["elements"]
+        except (requests.exceptions.HTTPError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
+            last_err = e
+            print(f"      failed: {e}")
+            continue
+    raise RuntimeError(f"All Overpass endpoints failed; last: {last_err}")
 
 
 def detect_geometric_circles(nodes, edges, max_perim_ft=200, max_diameter_ft=60):
@@ -374,6 +393,12 @@ def spatial_join_streets(edges, streets_path):
                 "SPEEDLIMIT":   majority_attr([a.get("SPEEDLIMIT") for a in attrs_per_sample]),
                 "ONEWAY":       majority_attr([a.get("ONEWAY") for a in attrs_per_sample]),
                 "UNITDESC":     majority_attr([a.get("UNITDESC") for a in attrs_per_sample]),
+                # SLOPE_PCT is SDOT's per-segment grade in unsigned integer
+                # percent. Kept on each edge for v3 elevation work (the
+                # deprecated v2 pipeline relied on it; v3 may revisit). Trail
+                # edges (skipped above) get None — those rely on DTM-derived
+                # slope only.
+                "SLOPE_PCT":    majority_attr([a.get("SLOPE_PCT") for a in attrs_per_sample]),
             }
             matched += 1
         else:
@@ -769,6 +794,15 @@ def expand_to_directed(nodes, edges, is_circle):
         except (TypeError, ValueError):
             artclass = 0
         has_centerline = artclass >= 1
+        # SDOT per-segment slope in unsigned integer percent (0..47 in
+        # Seattle). Magnitude only — SDOT doesn't publish sign. v3 may
+        # infer sign from DTM endpoint rise. None on trails / unmatched
+        # streets.
+        raw_slope = sdot.get("SLOPE_PCT")
+        try:
+            slope_pct = int(raw_slope) if raw_slope is not None else None
+        except (TypeError, ValueError):
+            slope_pct = None
 
         ow = parse_oneway(e["tags"].get("oneway"), sdot.get("ONEWAY"))
         directions = []
@@ -782,6 +816,42 @@ def expand_to_directed(nodes, edges, is_circle):
                                initial_bearing(rev_coords[0], rev_coords[1]),
                                initial_bearing(rev_coords[-2], rev_coords[-1])))
 
+        # OSM elevation-related tagging. We capture five fields that affect
+        # whether a raw DTM sample at this edge represents real ground level:
+        #   bridge  — way carries over something else (DTM reads water/ground
+        #             *under* it, not the deck)
+        #   tunnel  — way passes under something (DTM reads the surface *above*
+        #             it, not the tunnel floor)
+        #   covered — roofed (arcade / awning / carport); not strictly an
+        #             elevation tag — way sits at ground level — but signals
+        #             "DSM-style first-return rasters would see something
+        #             above me". Cheap to keep; useful for v3 debugging.
+        #   indoor  — inside a building (mall corridor, station concourse).
+        #             Pair with `layer` for an actual vertical signal.
+        #   layer   — signed integer relative vertical ordering. The truest
+        #             elevation tag of the bunch: layer=1 = one structure up,
+        #             layer=-1 = one structure down.
+        # NOTE: prior versions of this script fused `covered=yes` into
+        # `is_tunnel`. Now split: a `covered=yes` edge is *covered*, not
+        # *tunnel*, unless it also has a tunnel tag.
+        bridge_tag     = (e["tags"].get("bridge")     or "").strip().lower()
+        tunnel_tag     = (e["tags"].get("tunnel")     or "").strip().lower()
+        covered_tag    = (e["tags"].get("covered")    or "").strip().lower()
+        indoor_tag     = (e["tags"].get("indoor")     or "").strip().lower()
+        embankment_tag = (e["tags"].get("embankment") or "").strip().lower()
+        cutting_tag    = (e["tags"].get("cutting")    or "").strip().lower()
+        layer_raw      = (e["tags"].get("layer")      or "").strip()
+        is_bridge     = bridge_tag     not in ("", "no")
+        is_tunnel     = tunnel_tag     not in ("", "no")
+        is_covered    = covered_tag    not in ("", "no")
+        is_indoor     = indoor_tag     not in ("", "no")
+        is_embankment = embankment_tag not in ("", "no")
+        is_cutting    = cutting_tag    not in ("", "no")
+        try:
+            layer = int(layer_raw) if layer_raw else None
+        except ValueError:
+            layer = None
+
         for (_, nseq, cseq, b0, b1) in directions:
             out.append({
                 "from": nseq[0],
@@ -789,6 +859,14 @@ def expand_to_directed(nodes, edges, is_circle):
                 "lengthFt": round(length_ft, 1),
                 "lanes":    round(lanes, 2),
                 "hasCenterline": has_centerline,
+                "isBridge":     is_bridge,
+                "isTunnel":     is_tunnel,
+                "isCovered":    is_covered,
+                "isIndoor":     is_indoor,
+                "isEmbankment": is_embankment,
+                "isCutting":    is_cutting,
+                "layer":        layer,
+                "slopePct":  slope_pct,
                 "facilityCategory": e.get("facility_category"),
                 "facilityModelType": e.get("facility_model_type"),
                 "oneway":   (ow != "bidir"),
@@ -803,7 +881,218 @@ def expand_to_directed(nodes, edges, is_circle):
     return out
 
 
-def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle, out_path):
+def detect_untagged_crossings(directed_edges):
+    """Flag any way-segment that geometrically crosses another way-segment
+    on the 2D plane without sharing an OSM node, and that itself carries
+    no elevation tag (bridge / tunnel / covered / indoor / layer). The
+    *other* edge in the crossing pair may or may not be tagged — we only
+    flag the untagged participant(s).
+
+    Two categories of crossing pair (both reported, both flagged):
+      - both-untagged  → true ambiguity, v3 can't place either in 3D
+      - one-tagged     → OSM-canonical (the tagged way's tag is normally
+                         sufficient), but worth eyeballing for tagging
+                         gaps and to confirm OSM intent
+
+    Skips shared-node pairs (those are normal junctions). Returns the
+    set of directed-edge indices to mark with the bit-64 flag; both
+    forward + reverse copies of a flagged way-segment receive it."""
+    try:
+        from shapely.geometry import LineString
+        from shapely.strtree import STRtree
+    except ImportError:
+        print("    [warn] shapely not installed — skipping crossing detection")
+        return set()
+
+    def is_tagged(e):
+        return (e.get("isBridge") or e.get("isTunnel") or
+                e.get("isCovered") or e.get("isIndoor") or
+                e.get("layer") is not None)
+
+    # Dedupe to one representative per unique way-segment. Forward + reverse
+    # share the same underlying geometry, just traversed in opposite order.
+    repr_by_key = {}
+    for i, e in enumerate(directed_edges):
+        key = frozenset([e["from"], e["to"]])
+        if key not in repr_by_key:
+            repr_by_key[key] = i
+    repr_idxs = list(repr_by_key.values())
+    print(f"    {len(repr_idxs):,} unique way-segments to check")
+
+    lines = [LineString(directed_edges[i]["geometry"]) for i in repr_idxs]
+    tree = STRtree(lines)
+
+    n_both_untagged = 0
+    n_one_tagged = 0
+    flagged_keys = set()
+    for src in range(len(lines)):
+        # STRtree.query returns bbox-intersection candidates (integer indices).
+        for cand in tree.query(lines[src]):
+            if cand <= src:
+                continue
+            if not lines[src].intersects(lines[cand]):
+                continue
+            ea = directed_edges[repr_idxs[src]]
+            eb = directed_edges[repr_idxs[cand]]
+            # Skip junctions — shared OSM node endpoint means the topology
+            # already says they connect (not a 3D crossing).
+            if (ea["from"] in (eb["from"], eb["to"]) or
+                ea["to"]   in (eb["from"], eb["to"])):
+                continue
+            ea_tagged = is_tagged(ea)
+            eb_tagged = is_tagged(eb)
+            if ea_tagged and eb_tagged:
+                continue  # both have elevation info; no ambiguity
+            if not ea_tagged and not eb_tagged:
+                n_both_untagged += 1
+            else:
+                n_one_tagged += 1
+            if not ea_tagged:
+                flagged_keys.add(frozenset([ea["from"], ea["to"]]))
+            if not eb_tagged:
+                flagged_keys.add(frozenset([eb["from"], eb["to"]]))
+
+    print(f"    crossings (no shared node):")
+    print(f"      both untagged: {n_both_untagged:,} pairs (true ambiguity)")
+    print(f"      one tagged:    {n_one_tagged:,} pairs (only the untagged side flagged)")
+    print(f"      total flagged: {len(flagged_keys):,} unique way-segments")
+
+    # Expand keys back to all directed-edge indices (fwd + rev get the flag).
+    flagged_directed = set()
+    for i, e in enumerate(directed_edges):
+        if frozenset([e["from"], e["to"]]) in flagged_keys:
+            flagged_directed.add(i)
+    return flagged_directed
+
+
+# Priority for tie-breaking when an approach edge is equidistant from
+# multiple tagged sources. Lower number = higher priority. Bridge wins
+# most ties because it's by far the most common case and the highest
+# severity (raw DTM is most catastrophically wrong on bridges).
+# Embankment / cutting come AFTER bridge/tunnel/layered because the DTM
+# is *correct* on those (they're earthworks, not structures), so they're
+# informational rather than fix-needed — but still worth surfacing.
+APPROACH_PRIORITY = {
+    "bridge":     0,
+    "tunnel":     1,
+    "layered":    2,
+    "embankment": 3,
+    "cutting":    4,
+    "covered":    5,
+    "indoor":     6,
+}
+
+
+def _source_category(e):
+    """Map a tagged directed-edge dict to its category string, or None
+    if the edge has no elevation-related tag. Priority order (only one
+    category returned, matches APPROACH_PRIORITY ordering)."""
+    if e.get("isBridge"):     return "bridge"
+    if e.get("isTunnel"):     return "tunnel"
+    if e.get("layer") is not None and e["layer"] != 0: return "layered"
+    if e.get("isEmbankment"): return "embankment"
+    if e.get("isCutting"):    return "cutting"
+    if e.get("isCovered"):    return "covered"
+    if e.get("isIndoor"):     return "indoor"
+    return None
+
+
+def detect_approach_edges(directed_edges, max_dist_ft=200.0):
+    """Flag every untagged edge that's within `max_dist_ft` graph-walk
+    distance of any tagged (bridge/tunnel/layered/covered/indoor) edge.
+
+    Why this matters: OSM data frequently tags the bridge span itself
+    but NOT the ramp approaching it, even though the elevation change
+    is already happening on the approach. v3 will need to apply the
+    same "interpolate between trustworthy endpoints" fix to those ramps,
+    so we surface them here for visualization + later processing.
+
+    Algorithm: multi-source Dijkstra. Seed every tagged edge's endpoint
+    nodes at distance 0 with the source category. Relax outward along
+    the directed-edge adjacency until distance > max_dist_ft. Each
+    visited node remembers the closest-source (distance, category)
+    pair. Then for each untagged edge, look up both its endpoints; if
+    either is within range, this edge is an approach attributed to the
+    closer endpoint's source (ties broken by APPROACH_PRIORITY).
+
+    Returns dict[edge_idx] -> category_string for edges flagged as
+    approaches (untagged sources only)."""
+    import heapq
+
+    # Build node -> list of (edge_idx, neighbor_node_id, length_ft).
+    # Edges are directed in our representation; for graph-walking we
+    # want undirected reachability, so include both directions even
+    # if only one directed edge exists between two nodes.
+    adj = {}
+    for i, e in enumerate(directed_edges):
+        adj.setdefault(e["from"], []).append((i, e["to"], e["lengthFt"]))
+        adj.setdefault(e["to"],   []).append((i, e["from"], e["lengthFt"]))
+
+    # Multi-source Dijkstra: push every tagged edge's BOTH endpoints
+    # at distance 0 with the source category.
+    heap = []
+    seen_seeds = set()
+    n_tagged = 0
+    for i, e in enumerate(directed_edges):
+        cat = _source_category(e)
+        if cat is None:
+            continue
+        n_tagged += 1
+        pr = APPROACH_PRIORITY[cat]
+        for n in (e["from"], e["to"]):
+            if (n, cat) in seen_seeds:
+                continue
+            seen_seeds.add((n, cat))
+            heapq.heappush(heap, (0.0, pr, n, cat))
+
+    # node_best[n] = (dist, category) — best so far.
+    node_best = {}
+    while heap:
+        d, pr, n, cat = heapq.heappop(heap)
+        if d > max_dist_ft:
+            continue
+        cur = node_best.get(n)
+        if cur is not None:
+            cur_d, cur_cat = cur
+            cur_pr = APPROACH_PRIORITY[cur_cat]
+            if cur_d < d or (cur_d == d and cur_pr <= pr):
+                continue
+        node_best[n] = (d, cat)
+        for (_, nb, L) in adj.get(n, []):
+            nd = d + L
+            if nd > max_dist_ft:
+                continue
+            heapq.heappush(heap, (nd, pr, nb, cat))
+
+    # Classify each untagged edge by its nearer endpoint.
+    flagged = {}
+    for i, e in enumerate(directed_edges):
+        if _source_category(e) is not None:
+            continue  # tagged → not an approach
+        cands = []
+        for n in (e["from"], e["to"]):
+            best = node_best.get(n)
+            if best is not None:
+                cands.append((best[0], APPROACH_PRIORITY[best[1]], best[1]))
+        if not cands:
+            continue
+        cands.sort()  # closest distance, then highest priority
+        flagged[i] = cands[0][2]
+
+    # Stats by source category.
+    from collections import Counter
+    by_cat = Counter(flagged.values())
+    print(f"    {n_tagged:,} tagged directed-edges seeded the search")
+    print(f"    {len(flagged):,} untagged directed-edges within {max_dist_ft:.0f} ft "
+          f"flagged as approaches")
+    for cat in ("bridge", "tunnel", "layered", "embankment", "cutting", "covered", "indoor"):
+        if by_cat.get(cat):
+            print(f"      approach-of-{cat:<11} {by_cat[cat]:>5,}")
+    return flagged
+
+
+def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
+                            untagged_crossings, approach_edges, out_path):
     """Dense-pack IDs and emit columnar JSON.
 
     Columnar layout: one parallel array per attribute. Strings (street names,
@@ -885,14 +1174,41 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle, out_
     e_flags, e_fac, e_model, e_name = [], [], [], []
     e_geom, e_geom_rev = [], []
     e_b0, e_b1 = [], []
+    e_slopePct = []
+    e_layer = []
+    e_approachOf = []
 
     for i, e in enumerate(directed_edges):
         fr = remap[e["from"]]; to = remap[e["to"]]
         gidx, grev = add_geom(e["geometry"])
-        # Bitfield: 1 = hasCenterline, 2 = oneway.
+        # Bitfield:
+        #    1 = hasCenterline       2 = oneway
+        #    4 = isBridge            8 = isTunnel
+        #   16 = isCovered          32 = isIndoor
+        #   64 = isUntaggedCrossing 128 = isApproach
+        #  256 = isEmbankment      512 = isCutting
+        # Bridge / tunnel / covered / indoor / embankment / cutting are
+        # independent OSM elevation-related flags — same edge can have
+        # multiple set. Bridge and tunnel indicate the DTM is structurally
+        # wrong on this way (read water/ground under deck, or surface
+        # above tunnel). Embankment and cutting indicate real earthworks
+        # — the DTM IS correct, just informationally important to know
+        # the way is on raised earth or in a cut.
+        # Bit 64 (untaggedCrossing) and 128 (approach) are *derived*,
+        # not from OSM. See detect_untagged_crossings and
+        # detect_approach_edges for semantics. The nearest source
+        # category for approaches is recorded in `approachOf`.
         flags = 0
-        if e["hasCenterline"]: flags |= 1
-        if e["oneway"]:        flags |= 2
+        if e["hasCenterline"]:     flags |= 1
+        if e["oneway"]:            flags |= 2
+        if e.get("isBridge"):      flags |= 4
+        if e.get("isTunnel"):      flags |= 8
+        if e.get("isCovered"):     flags |= 16
+        if e.get("isIndoor"):      flags |= 32
+        if i in untagged_crossings: flags |= 64
+        if i in approach_edges:     flags |= 128
+        if e.get("isEmbankment"):  flags |= 256
+        if e.get("isCutting"):     flags |= 512
         e_from.append(fr); e_to.append(to)
         e_lenFt.append(e["lengthFt"]); e_lanes.append(e["lanes"])
         e_flags.append(flags)
@@ -901,6 +1217,9 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle, out_
         e_name.append(intern_name(e["streetName"]))
         e_geom.append(gidx); e_geom_rev.append(grev)
         e_b0.append(e["bearingStart"]); e_b1.append(e["bearingEnd"])
+        e_slopePct.append(e.get("slopePct"))
+        e_layer.append(e.get("layer"))
+        e_approachOf.append(approach_edges.get(i))   # str or None
         n_edges[fr].append(i)
 
     bbox = [min(n_lon), min(n_lat), max(n_lon), max(n_lat)]
@@ -935,6 +1254,21 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle, out_
             "geomRev":  e_geom_rev,
             "b0":       e_b0,
             "b1":       e_b1,
+            # SDOT per-segment slope magnitude, integer percent (0..47).
+            # null on trails / unmatched edges. Sign is unknown (SDOT
+            # publishes magnitude only); v3 pipeline will infer if useful.
+            "slopePct": e_slopePct,
+            # OSM `layer=*` value as signed int; null when unset.
+            # Positive = elevated by N structures, negative = below by N.
+            # The cleanest "true" elevation tag in OSM (bridge / tunnel /
+            # covered / indoor only tell you the *structure type*, not how
+            # many levels above or below ground you are).
+            "layer":    e_layer,
+            # Nearest tagged-source category for approach-flagged edges
+            # (bit 128). One of "bridge"/"tunnel"/"layered"/"covered"/
+            # "indoor", or null. Ties broken by APPROACH_PRIORITY order
+            # (bridge > tunnel > layered > covered > indoor).
+            "approachOf": e_approachOf,
         },
     }
     out_path.write_text(json.dumps(payload, separators=(",", ":")))
@@ -996,8 +1330,15 @@ def main():
     print("Step H: expand to directed edges + precompute constants...")
     directed = expand_to_directed(nodes, edges, is_circle)
 
-    print("Step I: renumber and serialize...")
-    renumber_and_serialize(nodes, directed, control_flags, is_circle, OUT)
+    print("Step I: detect untagged 2D crossings (data quality flag)...")
+    untagged_crossings = detect_untagged_crossings(directed)
+
+    print("Step J: flag approach edges (graph-walk ≤ 200 ft from tagged)...")
+    approach_edges = detect_approach_edges(directed, max_dist_ft=200.0)
+
+    print("Step K: renumber and serialize...")
+    renumber_and_serialize(nodes, directed, control_flags, is_circle,
+                            untagged_crossings, approach_edges, OUT)
 
     print("Done.")
     return 0

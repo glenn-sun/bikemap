@@ -15,17 +15,41 @@
   <body>
     <div id="map"></div>
 
-    <!-- ============ Top-left stack: routing + directions ============ -->
-    <div id="left-stack">
+    <!-- ============ Choose-on-map banner (hidden by default) ============ -->
+    <div id="choose-on-map-banner" hidden>
+      <span class="cob-msg">Tap the map to set start</span>
+      <button id="cob-cancel" type="button">Cancel</button>
+    </div>
+
+    <!-- ============ App title bar ============
+         Top-level sibling of #sheet (NOT a child of it) so the
+         transform on #sheet doesn't act as a containing block for
+         this fixed-positioned element on mobile. Desktop: pinned
+         pill at top-left. Mobile (≤719 px): fixed full-width bar at
+         top of viewport. -->
+    <header id="app-header">
+      <h1 class="app-title">Open Bike Map Seattle</h1>
+      <div class="app-header-actions">
+        <button id="layers-fab" type="button" aria-label="Layers" title="Layers">
+          <span class="material-symbols-outlined">layers</span>
+        </button>
+        <button id="open-settings" type="button" aria-label="Settings" title="Settings">
+          <span class="material-symbols-outlined">settings</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ============ Routing + directions sheet ============
+         Desktop: #left-stack is absolutely positioned at top-left,
+         #sheet is a transparent passthrough. Mobile: #sheet becomes
+         a draggable bottom sheet (src/sheet.js); the drag pill sits
+         on its own white surface. -->
+    <div id="sheet">
+      <div id="sheet-handle-bar" aria-hidden="true"></div>
+      <div id="left-stack">
       <div id="routing-panel">
-        <header id="app-header">
-          <h1 class="app-title">Open Bike Map Seattle</h1>
-          <button id="open-settings" type="button" aria-label="Settings" title="Settings">
-            <span class="material-symbols-outlined">settings</span>
-          </button>
-        </header>
-        <fieldset id="route-endpoints">
-          <legend>Directions</legend>
+        <section class="panel-section" id="route-endpoints">
+          <h3>Directions</h3>
           <div class="route-endpoints-grid">
             <button id="swap-endpoints" type="button"
                     aria-label="Swap start and end" title="Swap start and end">
@@ -56,9 +80,9 @@
               </div>
             </div>
           </div>
-        </fieldset>
-        <fieldset id="route-style">
-          <legend>Riding style</legend>
+        </section>
+        <section class="panel-section" id="route-style">
+          <h3>Riding style</h3>
           <div class="segmented-control" id="preset-segmented" role="radiogroup" aria-label="Riding style">
             <input type="radio" name="route-preset" id="preset-comfort" value="comfort" checked />
             <label for="preset-comfort" title="Greenways &amp; PBLs — prioritize comfort over directness">Comfort</label>
@@ -67,38 +91,55 @@
             <input type="radio" name="route-preset" id="preset-custom" value="custom" />
             <label for="preset-custom" id="preset-custom-label" title="Tune the sliders in Settings">Custom</label>
           </div>
-        </fieldset>
+        </section>
       </div>
       <div id="directions-panel" hidden></div>
+      </div>
     </div>
 
-    <!-- ====== Top-right (LEFT of zoom): layers visibility ====== -->
+    <!-- ====== Top-right (LEFT of zoom): layers visibility ======
+         On desktop: positioned absolutely at top-right (original look).
+         On mobile (@media max-width: 640px): hidden by default; the
+         #layers-fab toggles an `.open` class on this element to show it
+         as a full-screen overlay. -->
     <div id="layers-panel">
-      <fieldset>
-        <legend>Bike infrastructure</legend>
+      <header id="layers-panel-header">
+        <h2 id="layers-panel-title">Layers</h2>
+        <button id="layers-panel-close" type="button"
+                aria-label="Close" title="Close">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </header>
+      <section class="panel-section">
+        <h3>Bike infrastructure</h3>
         <label><input type="checkbox" id="toggle-aaa" checked /> All ages &amp; abilities</label>
         <label><input type="checkbox" id="toggle-bbl" checked /> Buffered bike lanes</label>
         <label><input type="checkbox" id="toggle-bl" checked /> Standard bike lanes</label>
         <label><input type="checkbox" id="toggle-sharrows" checked /> Sharrows / climbing</label>
         <label><input type="checkbox" id="toggle-planned" /> Planned (gray dotted)</label>
         <label><input type="checkbox" id="toggle-construction" /> Under construction</label>
-      </fieldset>
-      <fieldset>
-        <legend>Points</legend>
+      </section>
+      <section class="panel-section">
+        <h3>Terrain</h3>
+        <label><input type="checkbox" id="toggle-contours" /> Elevation contour lines</label>
+      </section>
+      <section class="panel-section">
+        <h3>Points</h3>
         <label><input type="checkbox" id="toggle-light-rail" checked /> Light rail stations</label>
         <label><input type="checkbox" id="toggle-pois" checked /> Points of interest</label>
         <label><input type="checkbox" id="toggle-restrooms" checked /> Restrooms</label>
         <label><input type="checkbox" id="toggle-bike-racks" checked /> Bike racks</label>
         <label><input type="checkbox" id="toggle-bike-signs" checked /> Bike signage</label>
-      </fieldset>
-      <fieldset id="layers-debug-fieldset" hidden>
-        <legend>Routing debug</legend>
+      </section>
+      <section class="panel-section" id="layers-debug-section" hidden>
+        <h3>Routing debug</h3>
         <label><input type="checkbox" id="toggle-signals-debug" /> Traffic signals</label>
         <label><input type="checkbox" id="toggle-crosswalks-debug" /> Crosswalks</label>
         <label><input type="checkbox" id="toggle-beacons-debug" /> Beacons</label>
         <label><input type="checkbox" id="toggle-stop-signs-debug" /> Stop signs</label>
-        <label><input type="checkbox" id="toggle-graph-debug" /> Routing graph</label>
-      </fieldset>
+        <label><input type="checkbox" id="toggle-graph-debug" /> Routing graph (slope)</label>
+        <label><input type="checkbox" id="toggle-graph-osm-tags-debug" /> OSM elevation tags</label>
+      </section>
     </div>
 
     <!-- ============ Settings modal ============ -->
@@ -110,10 +151,12 @@
         </button>
       </header>
 
-      <section class="settings-section">
+      <section class="panel-section">
         <h3>Saved locations</h3>
         <div class="settings-loc-row">
-          <label for="settings-home-input">Home</label>
+          <label for="settings-home-input">
+            <span class="material-symbols-outlined">home</span>Home
+          </label>
           <div class="addr-input-wrap" data-which="home">
             <input id="settings-home-input" class="addr-input" type="text"
                    autocomplete="off" placeholder="Type an address…" />
@@ -124,7 +167,9 @@
           </button>
         </div>
         <div class="settings-loc-row">
-          <label for="settings-work-input">Work</label>
+          <label for="settings-work-input">
+            <span class="material-symbols-outlined">work</span>Work
+          </label>
           <div class="addr-input-wrap" data-which="work">
             <input id="settings-work-input" class="addr-input" type="text"
                    autocomplete="off" placeholder="Type an address…" />
@@ -136,17 +181,17 @@
         </div>
       </section>
 
-      <section class="settings-section">
+      <section class="panel-section">
         <h3>Average cycling speed</h3>
         <p class="settings-hint">Used to estimate the travel time shown next to each route.</p>
         <label class="slider-row" for="settings-speed-input" title="Your typical riding speed across the route">
           <span class="slider-label">Speed</span>
           <span class="slider-val" id="settings-speed-val">10 mph</span>
-          <input type="range" id="settings-speed-input" min="4" max="25" step="1" value="10" />
+          <input type="range" id="settings-speed-input" min="5" max="20" step="1" value="10" />
         </label>
       </section>
 
-      <section class="settings-section">
+      <section class="panel-section">
         <h3>Custom route preferences</h3>
         <label class="settings-toggle" for="settings-custom-enabled">
           <input type="checkbox" id="settings-custom-enabled" />
@@ -155,7 +200,7 @@
         <div id="custom-sliders"></div>
       </section>
 
-      <section class="settings-section">
+      <section class="panel-section">
         <h3>Routing debug</h3>
         <label class="settings-toggle" for="settings-debug-enabled">
           <input type="checkbox" id="settings-debug-enabled" />
@@ -163,7 +208,7 @@
         </label>
       </section>
 
-      <section class="settings-section">
+      <section class="panel-section">
         <h3>Attributions</h3>
         <ul class="attrib-list">
           <li>Search &amp; basemap data &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</li>

@@ -43,7 +43,19 @@ support that.
 
 ```
 src/main.js        Orchestrator: pmtiles protocol, style assembly, glue;
-                   loads + persists checkbox state to localStorage
+                   loads + persists checkbox state to localStorage;
+                   wires layers FAB → toggling #layers-panel `.open`
+                   class (mobile overlay)
+src/sheet.js       Mobile bottom-sheet controller (active only when
+                   @media (max-width: 719px) matches). Pointer-drag with
+                   2 snap points (peek/full), velocity-biased snap,
+                   tap-to-toggle. Exports initSheet() + snapSheet(name).
+                   No-ops on desktop. Other modules call snapSheet() to
+                   collapse/expand the sheet at the right moments
+                   (popup open → peek, address-input focus → full,
+                   choose-on-map → peek). Sets #left-stack maxHeight
+                   per-snap so the bottom of long step lists is
+                   reachable.
 src/layers.js      Every SDOT/KC data layer; paint/filter expressions; icon loader
 src/basemap.js     Walks Protomaps layer paint and HSL-desaturates colors
 src/labels.js      Hand-rolled symbol layers for road/place/water names;
@@ -60,27 +72,51 @@ src/search/        addr_search.js — offline FlexSearch wrapper around
 src/routing/       Client-side routing:
                      graph.js       Loader + spatial indexes + connected-
                                     components precompute (snap filters out
-                                    isolated trail islands)
+                                    isolated trail islands); also exposes
+                                    nodeElev / edgeUphillFt / edgeElevProfile
                      cost.js        Slider → raw constants formulas;
-                                    presets; twist definitions
+                                    presets; twist definitions; elevation
+                                    surcharge via uphillFtPenalty +
+                                    steepBonusPerPct
                      astar.js       Binary-heap A* + findPathsMulti
                                     (primary + filtered twists)
                      signCoverage.js  Post-route sign-coverage multiplier
+                     elevation.js   Per-route series builder, climb stats,
+                                    elevationProfileSvg()
                      directions.js  Path → step list (unnamed-connector
                                     fill-in; classifyTurn)
                      mode.js        Tiny shared bus for "choose on map" mode
                      ui.js          Inputs, autocomplete, settings modal,
-                                    tabs, alts, choose-on-map, graph debug
+                                    tabs, alts, choose-on-map, graph debug,
+                                    elevation chart in directions panel
 
 public/data/       Snapshot GeoJSON (regenerable; see fetch_data.py)
 public/data/seattle_polygon.geojson   Seattle boundary from OSM (used for clipping)
-public/data/routing_graph.json        Routable graph (~8.5 MB, see build_graph.py)
+public/data/routing_graph.json        Routable graph + per-node/per-geom
+                                       elevation (~12 MB, see build_graph.py
+                                       then sample_dtm.py). Elevation is
+                                       temporary v3-prep wiring: smoothed
+                                       USGS 3DEP DTM + uniform-spacing
+                                       resample, no bridge correction yet.
+public/data/contours.geojson          25-ft elevation contour lines
+                                       (~1.7 MB; `index=1` flag for thicker
+                                       every-100ft). Re-extracted from the
+                                       RAW (unsmoothed) DTM by sample_dtm.py.
 public/data/addr_index.json           OSM addresses + POIs index (~19 MB,
                                        see build_addr_index.py)
 public/tiles/seattle.pmtiles          Basemap extract (~62 MB)
 
 scripts/fetch_data.py        ArcGIS REST → GeoJSON, clipped to Seattle polygon
 scripts/build_graph.py       Overpass + SDOT joins → public/data/routing_graph.json
+                              (also: 2D-crossing detection, approach BFS)
+scripts/sample_dtm.py        Stream USGS 3DEP DTM via /vsicurl/. Denoise
+                              (5×5 median + σ=2 Gaussian), bilinear-sample
+                              nodes + geom vertices, uniform-resample
+                              profiles to 75-ft sub-segments, compute
+                              per-edge climb metrics → routing_graph.json.
+                              Also extract 25-ft contours from the RAW
+                              DTM → contours.geojson. Caches Seattle window
+                              to dtm_cache/ (~32 MB, .gitignored).
 scripts/build_addr_index.py  Overpass addr:housenumber + named POIs → public/data/addr_index.json
 scripts/make_basemap.sh      pmtiles extract for Seattle bbox
 
@@ -108,17 +144,55 @@ npm run dev    # http://localhost:5173
 **Refresh data**:
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install requests shapely
+pip install requests shapely numpy rasterio scipy scikit-image
 python3 scripts/fetch_data.py         # SDOT/KC layers → public/data/*.geojson
 python3 scripts/build_graph.py        # OSM (Overpass) + SDOT joins → routing_graph.json
+python3 scripts/sample_dtm.py         # smoothed DTM + resampling → nodes.elev[]/geomElevs[]/edge climb + contours.geojson
 python3 scripts/build_addr_index.py   # OSM addresses + named POIs → addr_index.json
 ```
 `build_graph.py` reads the GeoJSONs `fetch_data.py` writes, so run them
-in order. `build_addr_index.py` is independent of `build_graph.py` but
-reads `seattle_polygon.geojson` (`fetch_data.py` creates it), so run
-`fetch_data.py` first if missing. Overpass queries are bbox-only; full
-Seattle pulls take 30–90 s each. Output sizes: routing_graph ~8.5 MB,
-addr_index ~19 MB.
+in order. `sample_dtm.py` reads the graph that `build_graph.py` writes
+and updates elevation in place — re-run it whenever the graph rebuilds.
+`build_addr_index.py` is independent of the two graph scripts but reads
+`seattle_polygon.geojson` (`fetch_data.py` creates it). Overpass queries
+are bbox-only; full Seattle pulls take 30–90 s each (the fetch is
+retried across 4 mirror endpoints because overpass-api.de often
+504s). Output sizes: routing_graph ~12 MB, contours ~1.7 MB, addr_index
+~19 MB.
+
+**Elevation status (TEMPORARY v3-prep wiring).** `sample_dtm.py`
+populates the full elevation schema from USGS 3DEP DTM with light
+raster denoising AND uniform-spacing profile resampling — both passes
+flow through to *both* the routing-cost metrics and the
+directions-panel chart, so all consumers see the same smoothed view:
+  - In-memory raster is denoised with **5×5 median + σ=2 px Gaussian**
+    (see `smooth_raster` in `sample_dtm.py`) BEFORE node/geom sampling.
+    Contour extraction still runs against the **raw** DTM, so the
+    topographic-line layer is unchanged.
+  - Each geom's per-vertex profile is then **resampled to uniform
+    sub-segments of ~75 ft** (`COST_RESAMPLE_FT`, with `n = max(1,
+    round(arc_length / 75 ft))` breakpoints), eliminating
+    OSM-vertex-spacing artifacts where one short "catch-up" segment
+    shows a catastrophic slope. The resampled breakpoint profile is
+    then linear-interped back to the original OSM vertex positions,
+    so `geomElevs[gi]` keeps its per-vertex shape while reflecting the
+    smoothed curve.
+  - `nodes.elev[]`  — bilinear smoothed-DTM at each routing-graph node
+  - `geomElevs[]`   — back-interpolated resampled profile, one elev per
+    OSM vertex (~163 K samples). Consumed by `graph.edgeElevProfile()`,
+    which feeds the directions-panel chart, `climbStats` (steepest
+    uphill %), and the chart-hover cursor.
+  - `edges.uphillFt[]`, `edges.maxUphillPct[]`, `edges.steepFt2[]`
+    — per-directed-edge climb metrics computed from the uniform-spacing
+    breakpoint profile directly (skipping the back-interp step for
+    precision). Same underlying resampled curve as `geomElevs[]`, so
+    chart-displayed steepness matches routing-cost view.
+This activates the elevation terms in `cost.js` and lights up the
+directions-panel elevation chart. **Bridges are still wrong** — neither
+the raster filter nor the resampling fixes the systematic "DTM reads
+water under the deck" error. v3 must add explicit bridge/tunnel/
+untagged-crossing handling on top. See "Elevation pipeline (deprecated,
+awaiting v3)" below for the post-resampling noise profile.
 
 **Refresh basemap**:
 ```bash
@@ -307,6 +381,8 @@ experience, shrinks the snapshot):
 | Routes — alternates | Soft pink `#f48fb1` line over white casing (same widths as primary) |
 | Step number badge | Pink `#e91e63` 24×24 circle, white 11px bold numeral, 2px white border, drop shadow. **Same rule** powers both the turn-by-turn `.route-step::before` and the on-map `.route-step-marker` — keep both in sync. |
 | Graph debug (toggle) | Magenta-pink lines `#ff00aa` + small dark-pink nodes `#880e4f` |
+| Elevation contours (toggle) | Brown `#9b7355` thin (every 25 ft, z12.5+) + darker brown `#7d5a3a` index (every 100 ft, z10.5+); italic "N ft" labels along index contours from z13.5+. Layer is added near the bottom of the data stack so bike infra and routes paint over it. |
+| Elevation profile chart (in directions panel) | Brown filled area (`#cdb293` @ 0.55 alpha) under a `#6d4c41` outline; y-axis tick labels `9px #6d4c41`; "N ft total climb" / "X% steepest uphill" caption row below the chart. Uses the same brown family as the contour layer so chart-and-map are visibly the same domain. |
 | UI chrome icons | Google Material Symbols Outlined (settings, home, work, my_location, near_me, swap_vert, close, directions) |
 | UI chrome accent (all) | Pink `#e91e63` — address-input focus, settings slider accents, dropdown-option icons, the "Go" POI button, and the "Customize in Settings" link. Pale pink `#fce4ec` for option-row hover and active-tab background. One pink palette across the UI so it reads consistently with the route line. |
 | User location dot | Standard Google-blue `#4285f4` filled circle, 11 px + white border (`.user-location-dot`); tracked live via `navigator.geolocation.watchPosition` in `routing/ui.js`. The blue POIs were shifted off this hue (restroom indigo `#3949ab`, light rail teal `#00838f`, bike-signs brown `#6d4c41`) so the user marker reads as the standard live-location indicator. |
@@ -477,7 +553,9 @@ G.1 **Collapse circle-cluster nodes** into synthetic merged nodes. Edges
     of external incident edges. Tags `isTrafficCircle`.
 H. **Expand to directed edges**: `forward` / `reverse` / `bidir`.
    Precompute `lengthFt`, `lanes`, `hasCenterline`, `bearingStart/End`,
-   `streetName` (OSM `name` only).
+   `streetName` (OSM `name` only). Carry the OSM elevation-related tags
+   into the directed-edge record: `isBridge`, `isTunnel`, `isCovered`,
+   `isIndoor`, and integer `layer` (parsed from `layer=*`).
 I. **Serialize columnar**: parallel arrays per attribute; geometry deduped
    (fwd/rev share index + `reversed` flag); strings interned. This
    columnar form is what gets the file to 8.5 MB; per-record JSON-key
@@ -667,7 +745,7 @@ NavigationControl. Bike infrastructure / Points / Routing debug toggles
 + ~32k unique-geometry edges; toggleable like other layers). The whole
 **Routing debug** fieldset (`#layers-debug-fieldset`) is hidden by
 default; flipping `#settings-debug-enabled` in Settings reveals it.
-Turning the gate off force-unchecks all 5 debug toggles (each
+Turning the gate off force-unchecks all 6 debug toggles (each
 `change` event runs through `VisibilityManager`, so any visible debug
 layer is removed).
 
@@ -730,7 +808,7 @@ JSON-encoded under these keys:
 - `bikemap-routing-preset` — `"athletic" | "comfort" | "custom"` (default `"comfort"`); if it's `"custom"` but custom isn't enabled, it auto-falls-back to `"comfort"` on load.
 - `bikemap-routing-custom` — `{ s1, s2, s3, s4, s5 }` slider snapshot
 - `bikemap-routing-custom-enabled` — `"true" | "false"` (default `"false"`); when `false`, the Custom button is hidden from the segmented control and the slider section is grayed out in Settings.
-- `bikemap-routing-debug-enabled` — `"true" | "false"` (default `"false"`); when `false`, the Routing debug fieldset in the layers panel is hidden and all 5 debug toggles are force-cleared at boot.
+- `bikemap-routing-debug-enabled` — `"true" | "false"` (default `"false"`); when `false`, the Routing debug fieldset in the layers panel is hidden and all 6 debug toggles are force-cleared at boot.
 - `bikemap-cycling-speed-mph` — number, 4–25, default 10 (drives the
   predicted-minutes display)
 - `bikemap-saved-home`, `bikemap-saved-work` — `{ label, lon, lat }`
@@ -779,10 +857,55 @@ In the "Routing debug" fieldset:
 - **Crosswalks** — yellow dots.
 - **Beacons** — purple dots (RFB + school).
 - **Stop signs** — stop-sign-red dots (SDOT R1-1, with FACING attribute).
-- **Routing graph** — overlays the entire bike-routable graph: every
-  edge as a magenta line, every node as a small dark-pink circle.
-  Edges are deduped by `geomIndex` (fwd/rev share). Useful for spotting
-  isolated trail islands, snap targets, edge-coverage gaps.
+- **Routing graph (slope)** — overlays every bike-routable edge colored
+  by absolute DTM slope, with each node as a small dark-pink circle.
+  Edges deduped by `geomIndex`; slope = `(elev_to − elev_from) / lengthFt`
+  computed in the UI from `nodes.elev[]`. Step thresholds: 0–1% gray,
+  1–3% light green, 3–6% yellow, 6–10% orange, 10–15% red, 15–20% dark
+  red, 20%+ dark purple. (Seattle's steepest real street is ~26%, so
+  anything purple is either a sustained climb like Marshall Park or a
+  DTM artifact — the chief example being bridge edges where DTM reads
+  the water surface under the deck.)
+- **OSM elevation tags** — same edge source, colored by OSM categorical
+  tag with a fixed priority (first match wins):
+    1. `untagged-crossing` (hot pink `#ec407a`) — derived data-quality
+       flag; see bitfield reference below
+    2. `bridge` (red `#d32f2f`)
+    3. `tunnel` (blue `#1565c0`)
+    4. `layered` (purple `#8e24aa`) — `layer=±N` but no bridge/tunnel tag
+    5. `embankment` (brown `#6d4c41`) — raised earthwork; DTM is correct
+    6. `cutting` (slate `#455a64`) — sub-grade cut; DTM is correct
+    7. `covered` (amber `#f9a825`)
+    8. `indoor` (teal `#00897b`)
+    9. `approach-of-{bridge,tunnel,layered,embankment,cutting,covered,indoor}`
+       — faded version of the source color (`#ffcdd2` / `#bbdefb` /
+       `#d1c4e9` / `#d7ccc8` / `#cfd8dc` / `#fff9c4` / `#b2dfdb`).
+       Untagged edges within ~200 ft graph-walk of a tagged edge —
+       likely the un-tagged approach ramp to a tagged structure.
+   10. default (gray `#9e9e9e`)
+  Counts on the current Seattle snapshot (per unique geometry; one geom
+  = one edge pair):
+    - 351 bridge, 31 tunnel, 30 covered, 22 embankment, 13 cutting,
+      0 indoor
+    - 410 with `layer=*` set (340 of those overlap with bridge, 16 with
+      tunnel; the remaining 46 are "layered" but untagged-structure)
+    - layer distribution: +1 = 355, −1 = 25, +2 = 14, +3 = 9, −2 = 5, +4 = 2
+    - 1 anomalous `bridge=yes tunnel=yes` edge (likely OSM mistag —
+      worth surfacing if you spot it on the map)
+    - 134 `untagged-crossing` edges from 192 crossing pairs (10 pairs
+      both-untagged = true ambiguity; 182 pairs with one side tagged =
+      OSM-canonical but worth eyeballing for tagging gaps)
+    - **1,506 unique-geometry approaches** (≈ 2,627 directed-edges):
+      1,017 of bridge, 187 of layered, 118 of tunnel, 106 of covered,
+      56 of embankment, 22 of cutting. Zero indoor.
+  Useful for v3 planning: bridge / tunnel / non-zero `layer` edges are
+  where raw DTM is structurally wrong; embankment / cutting are real
+  terrain — DTM is right, don't apply bridge-style fix logic to them;
+  covered edges only matter for DSM-style rasters; `untagged-crossing`
+  highlights ambiguous geometry that may need OSM tagging fixes;
+  **approach edges are the wider correction surface v3 should apply the
+  same "interpolate between trustworthy endpoints" fix to**, since OSM
+  frequently tags the bridge span but not the ramp.
 
 ### Known caveats
 
@@ -797,20 +920,397 @@ In the "Routing debug" fieldset:
   are indistinguishable from a normal intersection. Net effect: route
   emits "Turn left" instead of "Turn left at the traffic circle" —
   visually correct, just less specific.
-- **Bitfield reference.** Edges: `1 = hasCenterline`, `2 = oneway`
-  (alleys were removed entirely at OSM parse time via
-  `_is_bike_routable`, so no `isAlley` bit). Nodes: see Step F.
+- **Bitfield reference.** Edges:
+  `1 = hasCenterline`, `2 = oneway`,
+  `4 = isBridge`, `8 = isTunnel`,
+  `16 = isCovered`, `32 = isIndoor`,
+  `64 = isUntaggedCrossing`, `128 = isApproach`,
+  `256 = isEmbankment`, `512 = isCutting`.
+  Six OSM elevation-related flags (bridge / tunnel / covered / indoor /
+  embankment / cutting) are independent — same edge can have multiple
+  set. Bridge / tunnel are "DTM is structurally wrong here" flags
+  (read water/ground below or surface above). Embankment / cutting are
+  "DTM is correct, but the way is on raised earthwork / in a cut" —
+  informational, distinguish real-terrain transitions from structures.
+  (Earlier versions fused `covered=yes` into `isTunnel` — that's been
+  split.) Bits 64 and 128 are **derived**, not from OSM:
+  `isUntaggedCrossing` is set by `detect_untagged_crossings` on every
+  way-segment that 2D-crosses another (no shared OSM node) and carries
+  no elevation tag of its own; `isApproach` is set by
+  `detect_approach_edges` on every untagged edge within ~200 ft
+  graph-walk distance of any tagged edge (now including embankment
+  and cutting sources). The nearest source category is recorded in the
+  parallel `edges.approachOf[]` string column — one of
+  `bridge` / `tunnel` / `layered` / `embankment` / `cutting` /
+  `covered` / `indoor`, null when not an approach; ties broken by
+  that priority order. Alleys were removed entirely at OSM parse time
+  via `_is_bike_routable`, so no `isAlley` bit. Plus a separate
+  `edges.layer[]` signed-int column for OSM `layer=*` (null = unset).
+  Nodes: see Step F.
+
+## Elevation pipeline (temporary v3-prep — bridges still wrong)
+
+**Current state.** `sample_dtm.py` populates the full elevation schema
+from raw-then-smoothed USGS 3DEP DTM, then uniform-resamples each geom
+to 75-ft sub-segments before computing per-edge climb metrics. All
+elevation-consuming code paths (cost.js, the chart, `climbStats`, the
+debug overlay) see the same smoothed curve. The slider works; the chart
+renders real curves; the Flatter twist can differentiate routes.
+**Bridges are the elephant in the room** — neither raster smoothing nor
+arc-length resampling can fix systematic "DTM reads water under the
+deck" errors. v3's central job is to handle them. The graph has been
+annotated with everything v3 needs to drive that fix; the schema is
+already wired, so v3 can write into the same fields and have the entire
+app light up automatically.
+
+### Pipeline today (sample_dtm.py)
+
+1. Stream USGS 3DEP tile `n48w123` via rasterio `/vsicurl/`; cache the
+   Seattle window to `dtm_cache/seattle_window.npy` (~32 MB).
+2. **Denoise** the in-memory window with `5×5 median + σ=2 px Gaussian`
+   (`MEDIAN_KERNEL_SIZE`, `GAUSSIAN_SIGMA_PX` in `sample_dtm.py`). The
+   median kills isolated outlier cells; the Gaussian smooths residual
+   noise. Effective extent ~50 m — small enough not to flatten real
+   bluffs.
+3. Bilinear-sample at every routing-graph node → `nodes.elev[]` (feet).
+4. Bilinear-sample at every geom vertex → temporary per-vertex profile.
+5. **Uniform-resample** each geom: `n = max(1, round(arc_length / 75 ft))`
+   even sub-segments. Compute per-edge `uphillFt` / `maxUphillPct` /
+   `steepFt2` from the resampled breakpoints (per-sub-segment, 2% steep
+   threshold).
+6. Linear-interp the resampled breakpoints back to the OSM vertex
+   positions → overwrite `geomElevs[]`. The chart + `climbStats` now
+   see the same smoothed curve.
+7. Extract 25-ft contours from the **raw** (unsmoothed) DTM → overwrite
+   `contours.geojson`. The topographic layer stays free of resampling
+   artifacts.
+
+### What v3 actually has to add (the hard parts)
+
+Bridges. Specifically, the systematic error where bare-earth DTM
+samples water/ground level *under* a bridge deck rather than the deck
+itself. The graph already has the surface annotated:
+
+- `isBridge` (351 unique geoms): OSM-tagged bridge spans
+- `isTunnel` (31): OSM-tagged tunnels
+- `isUntaggedCrossing` (134): pairs of OSM ways that geometrically
+  cross without sharing a node and are both un-tagged for elevation —
+  the data-quality fix-targets
+- `isApproach` (1,506 unique geoms): every untagged edge within 200 ft
+  graph-walk distance of any tagged edge — captures the un-tagged ramps
+  that OSM convention leaves untagged. Source category recorded in
+  `edges.approachOf[]`.
+- `isEmbankment` (22) / `isCutting` (13): real earthworks — **DTM is
+  correct on these**, do NOT apply bridge-fix logic. They're seeded
+  into the approach BFS only to surface neighborhood context.
+- `edges.layer[]` signed int: OSM `layer=*` value, the cleanest "true"
+  elevation tag — positive = elevated, negative = below grade.
+
+### Starting points for v3 (suggestions)
+
+1. **Bridge endpoint reconstruction.** The wrong elevation at each
+   bridge node propagates into every edge that shares that node (the
+   one-node-one-elevation invariant). For each bridge endpoint, look
+   for a non-bridge neighbor with a "trustworthy" elevation (no flag set,
+   not an untagged-crossing, not an approach with `approachOf="bridge"`)
+   and replace the bridge endpoint's elevation with an interpolation
+   between trustworthy neighbors. Re-run per-edge climb metrics
+   afterward.
+2. **Apply the same fix to approach edges.** OSM frequently tags only
+   the bridge span; the actual elevation transition is on the ramps
+   beforehand. `isApproach` + `approachOf` gives v3 the correction
+   surface — same "interpolate between trustworthy endpoints" pattern,
+   but starting further out from the tagged span.
+3. **The "step at the end of a trail" pattern.** Some long flat trails
+   show a sustained climb concentrated at one endpoint (BGT at
+   Magnuson Park, etc.). The uniform resampling smooths the *reported*
+   slope, but the *underlying* node elevation at the trail-road
+   intersection is probably contaminated — the OSM node sits at the
+   road surface, not the trail surface beneath. This needs intersection-
+   aware logic: degree-≥3 node + trail-interior elevation that
+   contradicts the node's DTM reading → trust the trail-interior
+   extrapolation. Worth its own pass after bridge handling lands.
+4. **30% post-sample cap.** Seattle's steepest real street is 26% (owner-
+   verified). Anything above ~30% after v3's main work is residual
+   noise — clamp it. Cheap belt-and-suspenders.
+5. **Things explicitly NOT to do:**
+   - Don't apply bridge-fix logic to `isEmbankment` / `isCutting` —
+     those are real terrain, DTM is right.
+   - Don't pursue within-edge spike-pair detection (the v2 idea). I
+     audited the top-5 "spike artifact" candidates and all of them
+     were sustained multi-segment STEPS at one edge endpoint, not
+     isolated single-vertex spikes. Spike rejection wouldn't help.
+   - Don't re-sample raster at finer scale than `~50 m` — that's our
+     smoothing extent and the practical resolution limit at 10 m
+     cells. Anything finer is sampling noise.
+
+### Schema (fixed — v3 must write these)
+
+| Field | Shape | Notes |
+|---|---|---|
+| `nodes.elev[]` | one float per node, feet | One elevation per node (the one-node-one-elevation invariant). |
+| `geomElevs[]` | parallel to `geoms[]`, one float per vertex | Consumed by `edgeElevProfile()` → chart + `climbStats`. |
+| `edges.uphillFt[]` | one float per directed edge | Σ positive Δelev in traversal direction. |
+| `edges.maxUphillPct[]` | one float per directed edge, fraction | Inspection metric ONLY; **not** consumed by `cost.js`. |
+| `edges.steepFt2[]` | one float per directed edge | `Σ_seg(length · max(0, slope − 0.02)²)`. Consumed by `cost.js`. |
+
+Cost-function wiring in `src/routing/cost.js` (don't touch unless
+re-tuning):
+- `uphillFtPenalty = 40 · s5` — linear per-foot uphill penalty
+- `steepCoeff = 400 · s5` — quadratic-on-slope steepness penalty
+- `STEEP_THRESHOLD = 0.02` in both `cost.js` and `sample_dtm.py` —
+  keep them in sync if you change it
+- `Flatter` twist (`s5: +0.5`) is already defined; it'll start
+  meaningfully differentiating routes once v3 produces clean enough
+  elevation that A* sees real choices between alternates
+
+### Noise profile after current pipeline
+
+Measured on 35,254 unique way-segments; `maxUphillPct` is the inspection metric.
+
+| Threshold | raw DTM | smoothed only | + 75-ft resample (now) |
+|---|---:|---:|---:|
+| > 10% slope | 2,142 | 2,143 | **1,727** |
+| > 15% | 793 | 734 | **495** |
+| > 20% | 301 | 252 | **112** |
+| > 26% (Seattle real max) | 133 | 52 | **20** |
+| > 35% | 57 | 2 | **2** |
+| > 50% | 19 | 0 | **0** |
+| max | 80.5% | 39.6% | **37.2%** |
+
+The two remaining >35% slopes are both known bridges (no raster filter
+can fix them). Of the 20 over-26% edges, ~75% are tagged or approach
+edges that v3's bridge logic should address. The remaining ~5 plain
+high-slope edges are genuinely steep real Seattle terrain (downtown
+Lenora at the Elliott Way embankment, Union Street, the Magnolia bluff,
+etc.) — verified by owner inspection.
+
+### Constraints learned the hard way (carry these into v3)
+
+- **Bridges are systematic errors, not noise.** Smoothing helps with
+  random raster noise; bridges are correctly-measured *wrong* terrain.
+  Need explicit per-edge handling that doesn't sample DTM at bridge
+  spans.
+- **DTM ≠ DSM.** Bare-earth DTM reads water/ground under bridges.
+  First-return DSM reads bridge superstructure tops AND tree canopy
+  over at-grade roads. Neither alone is right; v1's hybrid wasn't
+  enough either. Don't re-introduce DSM unless you have a clear plan
+  for the tree-canopy contamination.
+- **`maxUphillPct` is for human inspection, not for cost.** `cost.js`
+  reads `uphillFt` (total positive rise) and `steepFt2` (length-weighted
+  quadratic). Both are robust to OSM-vertex-spacing variation. So a
+  catastrophic-looking max slope on a long-flat-with-spike edge doesn't
+  necessarily mean the routing is being misled — but it does mislead
+  the debug overlay and the chart caption. Resampling fixed the
+  inspection metric; cost was already approximately right.
+- **"Spike artifacts" are usually steps.** Inspecting the top-5
+  apparent spike-artifact edges showed all 5 had the steep slope
+  spread monotonically across 3-6 consecutive sub-segments at one
+  edge endpoint — a sustained transition, not an isolated bad sample.
+  v2-style spike-pair detection wouldn't catch them. Their underlying
+  cause is probably intersection-node elevation contamination (see
+  "Starting points for v3", item 3).
+- **Real Seattle hills exist and shouldn't be "fixed".** A surprising
+  number of "plain" high-slope edges turned out to be genuinely steep
+  real streets (Lenora downtown, Union St downtown, parts of W
+  Commodore Way, multiple West Seattle hill blocks). Spot-check before
+  treating any high-slope edge as an artifact.
+- **Owner-verified slope ceiling: 26%** is the steepest real street in
+  Seattle. >30% in the final graph means residual noise (or genuine
+  bike-path / staircase, but those are rare).
+- **The 1 anomalous `bridge=yes tunnel=yes` edge** is probably an OSM
+  mistag — surface it visually and decide whether to fix in OSM
+  upstream or special-case it.
+
+## Mobile layout
+
+Single breakpoint at `@media (max-width: 719px)`. Above 719 px the
+desktop layout is byte-identical to what existed before the mobile work
+(spot-check by resizing). Below 719 px the page transforms into:
+
+**Design intent**: mobile reuses the desktop COMPONENT styling — same
+panel padding, hit-target sizes, section/h3 look. Only the OUTER layout
+changes (title bar pins to the top; routing/directions become a
+draggable bottom sheet; layers panel becomes a full-screen overlay).
+Font sizes are shared between desktop and mobile.
+
+**Section primitive.** All grouped controls — Directions / Riding style
+in the routing panel, Bike infrastructure / Terrain / etc. in layers,
+Saved locations / Cycling speed / etc. in settings — use the same
+markup: `<section class="panel-section"><h3>Title</h3>…</section>`.
+One CSS rule (`.panel-section` + `.panel-section h3`) styles them all.
+The settings modal overrides padding to `12px 16px` via
+`#settings-modal .panel-section` for a bit more breathing room; the
+pills use the default `10px 12px`. Don't use `<fieldset>` /
+`<legend>` — `<fieldset>` has unusual built-in padding/legend offset
+behavior that diverges from `<div>` / `<h3>`, and using both was the
+inconsistency this primitive was created to remove.
+
+- **Title bar** (`#app-header`) — top-level DOM sibling of `#sheet`,
+  NOT a descendant. This is load-bearing on mobile: a `position: fixed`
+  element inside a transformed ancestor (the sheet's `translateY`) is
+  positioned relative to the ancestor, not the viewport. Putting
+  `#app-header` outside `#sheet` is the fix that keeps it pinned to
+  the top of the screen.
+  - Desktop: own pill at `top: 10px left: 10px width: 360px`, with an
+    explicit `height: 40px` (28 px chrome buttons + 6 px top/bottom
+    padding, `box-sizing: border-box`). `#left-stack` is pushed down
+    to `top: 56px` (= 10 + 40 + 6) so the title-bar→routing-panel gap
+    equals the 6 px flex `gap` between routing-panel and
+    directions-panel. Keep `#app-header`'s height in sync with that
+    arithmetic if you change either.
+  - Mobile: `position: fixed; top: 0; left: 0; right: 0` spanning the
+    viewport, with `z-index: 5` so it sits above the sheet (`z: 3`).
+  Holds the app title and the two chrome buttons (`#layers-fab`,
+  `#open-settings`) wrapped in `.app-header-actions`.
+- **Bottom sheet** (`#sheet`) — wraps `#left-stack`; on mobile,
+  `position: fixed` filling the viewport and translated vertically by
+  `src/sheet.js` to one of TWO snap points:
+  - **peek** (`min(200px, 28vh)`) — Start/End inputs + ride-style picker
+    visible. Endpoints always reachable.
+  - **full** (`92vh`) — scrollable full directions; map strip stays
+    visible up top (below the title bar).
+  Sheet has its OWN white background + drop shadow + top-rounded
+  corners; the drag pill lies on top of that sheet surface (not
+  floating above a separate inner panel). Inner `#routing-panel` /
+  `#directions-panel` are background-transparent on mobile so the
+  sheet reads as a single component.
+- **Drag handle** (`#sheet-handle-bar`) — 40 × 4 px gray bar centered
+  at the top of the sheet (26 px-tall hit strip). Pointer events: drag
+  snaps to nearer of {peek, full} with velocity bias
+  (`|vy| > 0.5 px/ms` → snap in direction of motion); pure tap toggles
+  peek ↔ full. Inner-scroll guard: if `pointerdown` lands inside
+  `#left-stack` with `scrollTop > 0`, the sheet does NOT drag — body
+  scrolls natively. Critically, `sheet.js` sets
+  `scrollEl.style.maxHeight = snapPx[name] - HANDLE_HEIGHT` after every
+  snap so the inner scroll container is sized to the visible sheet
+  portion — without this, the last items of long step lists would sit
+  in the off-screen tail of the sheet and be unreachable.
+- **Layers icon** (`#layers-fab`) lives inside the title bar next to
+  the settings gear on BOTH desktop and mobile. Both buttons share the
+  `#open-settings, #layers-fab` rule for matching chrome styling (28 ×
+  28 square, light-gray bg, thin border). The FAB gets a pink
+  `.active` class (managed by `wireLayersModal` in `src/main.js`) when
+  the layers panel is currently visible — same pink as the segmented
+  control's checked label, so the affordance reads as "this control is
+  active." Toggle semantics differ between viewports:
+  - Desktop: panel visible by default → FAB starts active (pink).
+    Click → `panel.classList.toggle('layers-hidden')`; CSS
+    `#layers-panel.layers-hidden { display: none }`.
+  - Mobile: panel hidden by default → FAB starts inactive. Click →
+    `panel.classList.toggle('open')`; the mobile @media block
+    restyles `#layers-panel.open` into a full-screen overlay modeled
+    on the settings dialog (sticky header with "Layers" title +
+    close X, sections).
+  The layers checkboxes are a single source of truth — they live in
+  `<div id="layers-panel">` at all times; only its outer positioning
+  flips between desktop (top-right pill, no title) and mobile
+  (`.open` overlay with "Layers" title). On desktop the layers panel
+  is restyled to match the settings modal's spacing and colors
+  (sections with `padding: 12px 16px`, `border-bottom: 1px solid
+  #f0f0f0`, rounded 8 px, brighter shadow). `#layers-panel-close` is
+  the X inside the mobile overlay; Escape also closes (mobile only).
+  A `matchMedia('(max-width: 719px)')` change listener re-syncs the
+  FAB's `.active` state when the user resizes across the breakpoint.
+- **Settings dialog** — `dialog#settings-modal` overridden to
+  `100vw × 100vh, border-radius: 0` on mobile; header is `position:
+  sticky` so the close-X stays reachable while content scrolls. Inner
+  styling unchanged.
+- **Choose-on-map banner** (`#choose-on-map-banner`) — pink rounded chip
+  at top-center, shown by `beginChooseOnMap` and dismissed by
+  `cancelChooseOnMap` or the Cancel button. Shown on both desktop and
+  mobile.
+- **`:active` rules** — placed outside the media query so they apply
+  everywhere (desktop hover preserved; tap feedback added on touch).
+  No padding or font-size changes — only background/color.
+- **MapLibre NavigationControl hidden on mobile** — the FAB owns the
+  top-right corner; pinch + drag are native.
+
+Sheet-snap helpers other modules already call:
+- `snapSheet('peek')` — `popups.js` when a popup opens; `ui.js` when
+  entering choose-on-map mode.
+- `snapSheet('full')` — `ui.js` when an `.addr-input` (routing-endpoint
+  role only) gains focus, so the autocomplete dropdown has room.
+
+Files that own the mobile UX: `src/sheet.js`, the `@media (max-width:
+719px) { ... }` block at the bottom of `src/style.css`, the
+`#sheet` / `#sheet-handle-bar` / `#layers-fab` / `#layers-panel-close` /
+`#choose-on-map-banner` elements in `index.html`.
+
+### Summary-block SVGs (infra bar + elevation chart)
+
+Both inline SVGs in the directions summary (`infraSummaryBarSvg` and
+the chart from `elevationProfileSvg` rendered by `elevationBlockHtml`)
+use a **viewBox-width == rendered-pixel-width = 1:1** mapping. Each
+generator takes a `vbWidth` argument and emits `<svg width="W"
+height="H" viewBox="0 0 W H">` where W is computed at render time from
+`directionsPanelInnerWidth(state)` — typically `state.panel.clientWidth`,
+with a viewport-based fallback. CSS gives them only `display: block;
+max-width: 100%` — no `width: 100%; height: auto`, because that path
+uniformly scales the whole SVG (including font size and bar height)
+with container width.
+
+Consequence: font sizes (e.g. `.route-infra-label { font-size: 11px }`,
+`.route-elev-tick { font-size: 10px }`) and inner heights (e.g. the
+14 px-tall infra bar, the 114 px-tall chart) stay constant across
+phone and desktop widths. Only the horizontal extent stretches.
+
+A `window.resize` listener (`attachDirectionsResizeHandler` in
+`src/routing/ui.js`) re-runs `renderPrimary` when the panel width
+drifts by ≥ 4 px so the SVGs re-render at the new width. The 4 px
+deadband avoids thrashing from mobile-keyboard show/hide and other
+trivial resize events.
+
+Other details worth knowing for these SVGs:
+
+- The infra bar's viewBox **height** collapses when only one side has
+  labels (e.g. all-AAA → no bottom labels → drop the 36 px bot zone →
+  VB_H goes 82 → 50). See `infraSummaryBarSvg` for the layout.
+- The elevation chart's inner `pad` is `{ l: 40, r: 22, t: 32, b: 16 }`.
+  `pad.l = 40` is sized for the y-axis tick labels ("525 ft" ≈ 32 px
+  at the 10 px tabular-nums tick font, anchored end-aligned at
+  `x = pad.l - 4`). `pad.r = 22` is sized for the centered cursor
+  tooltip text (~36 px wide for "+24.5%") at the right end of the
+  chart. If you change either label's content (e.g. add a unit suffix
+  beyond "ft"), revisit those numbers.
+- The chart's resolution comes from per-polyline-vertex elevations in
+  `graph.geomElevs[]` (a parallel array to `graph.geoms[]`, one float
+  per shape point). It is NOT linear interpolation between node
+  elevations. See the Elevation pipeline section — short version:
+  USGS 3DEP DTM sampled at every polyline vertex, then median-5 +
+  Gaussian σ=2 smoothed at build time.
+
+Decisions worth remembering:
+- **Sheet vs. side panel**: the owner explicitly chose bottom sheet
+  (familiar Google / Apple Maps pattern). Don't refactor to a hamburger
+  drawer without re-asking.
+- **No new npm deps** for the drag controller — implemented inline in
+  `src/sheet.js`.
+- **Map symbols not resized on mobile** (bike-rack / bike-sign dots stay
+  small for legibility when they're dense). Mobile-tap-target work for
+  those POIs is deferred and will land via a different mechanism later.
+- **Layers checkboxes live in ONE place** — `<div id="layers-panel">`.
+  CSS reshapes it (top-right pill on desktop, full-screen overlay on
+  mobile when `.open`). Do not clone the fieldsets and don't wrap them
+  in a `<dialog>` — earlier attempts at this broke the desktop render
+  because `<dialog>` defaults to `display: none` and CSS overrides
+  proved fragile.
+- **Mobile keeps desktop visuals.** Don't bump paddings, font sizes, or
+  hit-target dimensions inside the @media block. The owner verified
+  that mobile should look like the desktop layout, just repositioned
+  into a sheet.
+- **Layers FAB shows on desktop too** — toggles `#layers-panel`
+  visibility on desktop (default visible → FAB starts pink). Mobile
+  uses the same FAB to open the overlay. Both flows are unified in
+  `wireLayersModal` in `src/main.js`; the FAB's pink `.active` class
+  tracks whether the panel is currently visible. Pink "active" is the
+  established affordance for "this toggle is on" — see the segmented
+  control's checked label and the Go-button on POI popups.
 
 ## What's intentionally out of scope (so far)
 
 - GitHub Actions deploy workflow (one-liner when wanted; the build
   already produces a clean `dist/`).
-- **Elevation / flatter-terrain preference.** The 5th slider (`s5`,
-  UI label "Prefer flatter terrain (coming soon)") is wired into the UI
-  and persisted but does nothing — the routing graph carries no
-  elevation. Owner has plans for a >40% steep-slope layer; once
-  elevation is in `routing_graph.json`, wire `s5` into the cost
-  function.
 - **Online geocoder fallback** for addresses missing from OSM. Constraint
   is no API keys / fully static. Photon (`photon.komoot.io`) would fit
   if this relaxes; for now coverage gaps mean the user drops a pin.
@@ -824,6 +1324,25 @@ In the "Routing debug" fieldset:
 
 ## Hard-won lessons
 
+- **`position: fixed` inside a transformed ancestor is positioned
+  relative to that ancestor, NOT the viewport.** The bottom-sheet's
+  `transform: translateY(...)` made it a containing block for any
+  fixed-positioned descendant. An "always-on-top" title bar nested
+  inside `#sheet` therefore moved with the sheet's translateY,
+  appearing at the top of the SHEET (which was mid-screen) rather
+  than the top of the SCREEN. The fix is structural: keep
+  fixed-positioned chrome OUT of any transformed ancestor — make
+  `#app-header` a top-level sibling of `#sheet`, not a child.
+- **`<svg width="100%" viewBox="0 0 W H">` uniformly scales the
+  entire SVG**, including text font-size and inner shape heights, with
+  the container width. That's a problem when you want a responsive
+  *width* but a stable *height + font*. The fix is to render with
+  `width="<px>" height="<px>" viewBox="0 0 <px> <px>"` (1:1 viewBox
+  to pixel), recomputing the pixel width at render time from the
+  container's clientWidth. Then 1 viewBox unit = 1 screen pixel and
+  font sizes/heights stay constant. See `directionsPanelInnerWidth`
+  + `attachDirectionsResizeHandler` in `src/routing/ui.js` and the
+  Summary-block SVGs section under Mobile layout.
 - **Owner ground truth wins over indirect analysis.** I've made
   successive overclaims from indirect signals (addr/node density →
   "neighborhood gap", building polygons without `addr:housenumber` → "65%
@@ -922,3 +1441,8 @@ In the "Routing debug" fieldset:
   connectivity), (b) sign-coverage is added POST-route so the displayed
   total differs from the A\* objective, or (c) the displayed route is a
   twist with perturbed weights rather than the primary.
+- **Elevation has its own section.** See "Elevation pipeline
+  (temporary v3-prep — bridges still wrong)" above for the full
+  current-state, schema, lessons, and v3-design starting points. The
+  short version: bridges remain the unsolved problem; smoothing +
+  resampling clean everything else.

@@ -111,7 +111,7 @@ LAYERS: list[Layer] = [
         "seattle_streets",
         f"{SDOT}/Seattle_Streets_1/FeatureServer/0",
         where="STATUS = 'INSVC'",
-        out_fields="COMPKEY,UNITDESC,ARTCLASS,SURFACEWIDTH,SPEEDLIMIT,ONEWAY",
+        out_fields="COMPKEY,UNITDESC,ARTCLASS,SURFACEWIDTH,SPEEDLIMIT,ONEWAY,SLOPE_PCT",
     ),
     # NOTE: alleys.geojson is NOT fetched from SDOT — SEGMENT_TYPE=15 turned
     # out to be tiny micro-segments, not real alleys. Instead, build_graph.py

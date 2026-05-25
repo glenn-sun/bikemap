@@ -9,6 +9,7 @@ import { basemapLabelLayers } from './labels.js';
 import { VisibilityManager } from './visibility.js';
 import { attachPopups } from './popups.js';
 import { initRoutingUI } from './routing/ui.js';
+import { initSheet } from './sheet.js';
 
 const protocol = new Protocol();
 maplibregl.addProtocol('pmtiles', protocol.tile);
@@ -60,9 +61,61 @@ map.on('load', () => {
       const vm = wireToggles(map);
       attachPopups(map);
       initRoutingUI(map, vm);
+      initSheet();
+      wireLayersModal();
     })
     .catch((err) => console.error('addDataLayers failed:', err));
 });
+
+// The layers FAB toggles the layers panel on both desktop and mobile —
+// but the underlying semantics differ:
+//
+//   Desktop: panel is visible by default. Click → toggle `.layers-hidden`
+//            on the panel (CSS: hidden when set, visible when absent).
+//   Mobile:  panel is hidden by default. Click → toggle `.open` on the
+//            panel (CSS: full-screen overlay when set, hidden when absent).
+//
+// In both cases the FAB itself gets a `.active` class while the panel is
+// visible, so it can render in pink to indicate "showing layers" — same
+// affordance as other pink "active" controls (segmented control, etc.).
+function wireLayersModal() {
+  const fab = document.getElementById('layers-fab');
+  const panel = document.getElementById('layers-panel');
+  const closeBtn = document.getElementById('layers-panel-close');
+  if (!fab || !panel) return;
+
+  const isMobile = () => window.matchMedia('(max-width: 719px)').matches;
+  const isVisible = () => isMobile()
+    ? panel.classList.contains('open')
+    : !panel.classList.contains('layers-hidden');
+
+  const setVisible = (visible) => {
+    if (isMobile()) {
+      panel.classList.toggle('open', visible);
+    } else {
+      panel.classList.toggle('layers-hidden', !visible);
+    }
+    fab.classList.toggle('active', visible);
+  };
+
+  // Initial state: visible on desktop, hidden on mobile (matches each
+  // viewport's CSS default; this call just syncs the FAB's `.active`
+  // class to that default).
+  setVisible(isVisible());
+
+  fab.addEventListener('click', () => setVisible(!isVisible()));
+  closeBtn?.addEventListener('click', () => setVisible(false));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isMobile() && isVisible()) setVisible(false);
+  });
+
+  // Resyc when the user crosses the breakpoint via resize — the CSS
+  // defaults flip (e.g. resize into mobile hides the previously-visible
+  // desktop panel), so the FAB's `.active` state should track that.
+  window.matchMedia('(max-width: 719px)').addEventListener?.('change', () => {
+    setVisible(isVisible());
+  });
+}
 
 const LS_TOGGLES = 'bikemap-toggles';
 
@@ -95,6 +148,7 @@ function wireToggles(map) {
     'bike-facilities-construction-bl',
     'bike-facilities-construction-narrow',
   ]);
+  vm.group('contours',    ['contours-thin', 'contours-index', 'contours-labels']);
   vm.group('light-rail',  ['light-rail-stations']);
   vm.group('pois',        ['libraries', 'community-centers']);
   vm.group('restrooms',   ['parks-restrooms']);
@@ -108,7 +162,8 @@ function wireToggles(map) {
   // isn't loaded yet at this point). VisibilityManager.apply() skips
   // missing layers silently, and we'll call vm.apply() again once the
   // layers actually exist.
-  vm.group('graph-debug',      ['graph-debug-edges', 'graph-debug-nodes']);
+  vm.group('graph-debug',          ['graph-debug-edges', 'graph-debug-nodes']);
+  vm.group('graph-osm-tags-debug', ['graph-osm-tags-debug']);
 
   vm.bindCheckbox('aaa',         'toggle-aaa',         persisted)
     .bindCheckbox('bbl',         'toggle-bbl',         persisted)
@@ -116,6 +171,7 @@ function wireToggles(map) {
     .bindCheckbox('sharrows',    'toggle-sharrows',    persisted)
     .bindCheckbox('planned',     'toggle-planned',     persisted)
     .bindCheckbox('construction','toggle-construction',persisted)
+    .bindCheckbox('contours',    'toggle-contours',    persisted)
     .bindCheckbox('light-rail',  'toggle-light-rail',  persisted)
     .bindCheckbox('pois',        'toggle-pois',        persisted)
     .bindCheckbox('restrooms',   'toggle-restrooms',   persisted)
@@ -125,7 +181,8 @@ function wireToggles(map) {
     .bindCheckbox('crosswalks-debug', 'toggle-crosswalks-debug', persisted)
     .bindCheckbox('beacons-debug',    'toggle-beacons-debug',    persisted)
     .bindCheckbox('stop-signs-debug', 'toggle-stop-signs-debug', persisted)
-    .bindCheckbox('graph-debug',      'toggle-graph-debug',      persisted)
+    .bindCheckbox('graph-debug',          'toggle-graph-debug',          persisted)
+    .bindCheckbox('graph-osm-tags-debug', 'toggle-graph-osm-tags-debug', persisted)
     .onChange((snap) => {
       try { localStorage.setItem(LS_TOGGLES, JSON.stringify(snap)); } catch {}
     })

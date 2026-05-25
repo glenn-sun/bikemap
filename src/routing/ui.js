@@ -30,6 +30,8 @@ import { loadGraph } from './graph.js';
 import { findPath, findPathsMulti } from './astar.js';
 import { buildDirections, formatDistance } from './directions.js';
 import { computeSignCoverage } from './signCoverage.js';
+import { buildElevationSeries, climbStats, elevationProfileSvg,
+         pointAtDistance, distanceAtPoint, slopeAtDistance } from './elevation.js';
 import {
   PRESETS, SLIDERS, TWISTS,
   weightsForPreset, weightsForCustom,
@@ -37,6 +39,7 @@ import {
 } from './cost.js';
 import { searchAddresses, preloadAddrIndex } from '../search/addr_search.js';
 import { setMode, clearMode, getMode, isChoosingOnMap } from './mode.js';
+import { snapSheet } from '../sheet.js';
 
 const GRAPH_URL = `${import.meta.env.BASE_URL}data/routing_graph.json`;
 const SIGNS_URL = `${import.meta.env.BASE_URL}data/bike_signs.geojson`;
@@ -59,7 +62,7 @@ const DEFAULT_SPEED_MPH = 10;
 
 // IDs of the five routing-debug toggle checkboxes (one per debug overlay
 // in the layers panel). The "Enable routing debug layers" Settings toggle
-// gates their visibility in the layers panel AND clears all five when it
+// gates their visibility in the layers panel AND clears all seven when it
 // is disabled.
 const DEBUG_TOGGLE_IDS = [
   'toggle-signals-debug',
@@ -67,6 +70,7 @@ const DEBUG_TOGGLE_IDS = [
   'toggle-beacons-debug',
   'toggle-stop-signs-debug',
   'toggle-graph-debug',
+  'toggle-graph-osm-tags-debug',
 ];
 
 // Route is rendered in pink — opposite green on the color wheel so AAA /
@@ -107,6 +111,13 @@ export function initRoutingUI(map, vm = null) {
     userLocation: null,  // {lon, lat, accuracy} — null until first GPS fix
     userLocationMarker: null,
     geoWatchId: null,
+    // Two-way hover sync between elevation chart and the active route
+    // line on the map. `hoverSeries` is the current active route's
+    // elevation series (distances/elevations/coords); `hoverMarker` is a
+    // pink dot that tracks the cursor on the map; the chart cursor lives
+    // inside the .route-elev SVG as a <line> + <circle>.
+    hoverSeries: null,
+    hoverMarker: null,
   };
   // If the persisted preset is Custom but Custom is no longer enabled,
   // fall back so we never expose a hidden mode.
@@ -124,6 +135,8 @@ export function initRoutingUI(map, vm = null) {
   setPresetUI(state);
   wireGlobalChooseInteractions(state);
   startUserLocationTracking(state);
+  attachMapHoverHandlers(state);
+  attachDirectionsResizeHandler(state);
   // Boot-time enforcement of the debug gate: if it's off (default), make
   // sure no debug layer is visible even if a stale `bikemap-toggles` entry
   // would otherwise have re-enabled one.
@@ -545,36 +558,364 @@ function addStepMarkers(state, steps) {
   }
 }
 
+// ---------- chart ↔ map hover sync ----------
+//
+// Two-way: mousing over the elevation chart drops a pink dot on the map
+// at the matching route position; mousing over the active route LINE on
+// the map drops a cursor line on the chart at the matching distance.
+//
+// hoverSeries / hoverChartGeom are populated by elevationBlockHtml() each
+// time the active route is rendered, so the cursor is always in sync with
+// whatever route is currently shown.
+
+function ensureHoverMarker(state) {
+  if (state.hoverMarker) return state.hoverMarker;
+  const el = document.createElement('div');
+  el.className = 'route-hover-dot';
+  state.hoverMarker = new maplibregl.Marker({ element: el, anchor: 'center' });
+  return state.hoverMarker;
+}
+
+function hideHoverCursor(state) {
+  if (state.hoverMarker) state.hoverMarker.remove();
+  const panel = state.panel;
+  if (!panel) return;
+  panel.querySelector('.route-elev-cursor-line')?.setAttribute('hidden', '');
+  panel.querySelector('.route-elev-cursor-dot') ?.setAttribute('hidden', '');
+  panel.querySelector('.route-elev-cursor-label')?.setAttribute('hidden', '');
+}
+
+/** Move both cursors (map dot + chart line/dot/label) to the given
+ *  distance along the active route. Either direction calls this. */
+function moveHoverCursorToDist(state, distFt) {
+  const series = state.hoverSeries;
+  const geom = state.hoverChartGeom;
+  if (!series || !geom) return;
+  const totalDist = geom.totalDist;
+  if (!(totalDist > 0)) return;
+  const d = Math.max(0, Math.min(totalDist, distFt));
+  const pt = pointAtDistance(series, d);
+  if (!pt) return;
+  // Map marker
+  const marker = ensureHoverMarker(state);
+  marker.setLngLat([pt.lon, pt.lat]).addTo(state.map);
+  // Chart cursor
+  const panel = state.panel;
+  const line = panel?.querySelector('.route-elev-cursor-line');
+  const dot  = panel?.querySelector('.route-elev-cursor-dot');
+  const lbl  = panel?.querySelector('.route-elev-cursor-label');
+  if (!line || !dot || !lbl) return;
+  const pad = geom.pad;
+  const innerW = geom.width - pad.l - pad.r;
+  const innerH = geom.height - pad.t - pad.b;
+  const x = pad.l + (d / totalDist) * innerW;
+  const elevRange = Math.max(1, geom.maxElev - geom.minElev);
+  const y = pad.t + (1 - (pt.elevFt - geom.minElev) / elevRange) * innerH;
+  line.setAttribute('x1', x.toFixed(1));
+  line.setAttribute('x2', x.toFixed(1));
+  line.removeAttribute('hidden');
+  dot.setAttribute('cx', x.toFixed(1));
+  dot.setAttribute('cy', y.toFixed(1));
+  dot.removeAttribute('hidden');
+  // Three-line label stacked vertically: elev / distance / slope. The
+  // grade uses a smoothed window so a single noisy DEM segment doesn't
+  // dominate. Stacking keeps each line short (~6 chars) so the
+  // text-anchor="middle" rarely clips at the chart's left/right edges.
+  const slope = slopeAtDistance(series, d);
+  const pctStr = (slope >= 0 ? '+' : '') + (slope * 100).toFixed(1) + '%';
+  // 3 lines stacked at 10 px each. With pad.t = 32, lines at y = 9, 19,
+  // 29 sit entirely in the top padding above the elevation curve, so the
+  // tooltip never overlaps the plotted data.
+  lbl.setAttribute('y', '9');
+  lbl.querySelector('.route-elev-cursor-elev').setAttribute('x', x.toFixed(1));
+  lbl.querySelector('.route-elev-cursor-mi'  ).setAttribute('x', x.toFixed(1));
+  lbl.querySelector('.route-elev-cursor-pct' ).setAttribute('x', x.toFixed(1));
+  lbl.querySelector('.route-elev-cursor-elev').textContent = `${Math.round(pt.elevFt)} ft`;
+  lbl.querySelector('.route-elev-cursor-mi'  ).textContent = `${(d / 5280).toFixed(2)} mi`;
+  lbl.querySelector('.route-elev-cursor-pct' ).textContent = pctStr;
+  lbl.removeAttribute('hidden');
+}
+
+function attachChartHoverHandlers(state) {
+  if (!state.panel) return;
+  const svg = state.panel.querySelector('.route-elev-chart');
+  if (!svg) return;
+  const geom = state.hoverChartGeom;
+  if (!geom) return;
+  const innerW = geom.width - geom.pad.l - geom.pad.r;
+  const onMove = (e) => {
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const xPx = e.clientX - rect.left;
+    const xVB = xPx * (geom.width / rect.width);
+    const t = (xVB - geom.pad.l) / innerW;
+    const d = geom.totalDist * Math.max(0, Math.min(1, t));
+    moveHoverCursorToDist(state, d);
+  };
+  svg.addEventListener('mousemove', onMove);
+  svg.addEventListener('mouseleave', () => hideHoverCursor(state));
+}
+
+/** One-time wiring: hovering the active route LINE on the map drives the
+ *  same cursor sync. Called once from initRoutingUI(); it stays bound for
+ *  the life of the page and reads `state.hoverSeries` (refreshed on each
+ *  route render) so it always reflects the current active route. */
+function attachMapHoverHandlers(state) {
+  const map = state.map;
+  if (!map) return;
+  map.on('mousemove', ROUTE_LINE, (e) => {
+    if (isChoosingOnMap()) return;
+    if (!state.hoverSeries) return;
+    const d = distanceAtPoint(state.hoverSeries, e.lngLat.lng, e.lngLat.lat);
+    if (d == null) return;
+    moveHoverCursorToDist(state, d);
+  });
+  map.on('mouseleave', ROUTE_LINE, () => hideHoverCursor(state));
+}
+
 function infraBreakdown(graph, edgeIds) {
   // Bucket each edge's length by routing category. Used to render the
-  // per-route AAA / Other / Local / Major percentages.
+  // per-route infrastructure bar.
   //   - AAA          : facility ∈ {BKF-NGW, BKF-PBL, BKF-OFFST}
-  //   - Other bike   : any other facility tag (BBL, BL, CLMB, SHW)
+  //   - Other bike   : split into BBL / BL / sharrow-or-climbing so the
+  //                    bar can render their three colors in proportion
   //   - Local streets: no facility AND no centerline (≈ residential)
   //   - Major streets: no facility AND has centerline (arterial/collector)
-  let aaa = 0, other = 0, local = 0, major = 0, total = 0;
+  let aaa = 0, bbl = 0, bl = 0, shw = 0, local = 0, major = 0, total = 0;
   for (const eid of edgeIds) {
     const len = graph.edgeLengthFt(eid);
     total += len;
     const fac = graph.edgeFacility(eid);
     if (fac === 'BKF-NGW' || fac === 'BKF-PBL' || fac === 'BKF-OFFST') aaa += len;
-    else if (fac) other += len;
+    else if (fac === 'BKF-BBL') bbl += len;
+    else if (fac === 'BKF-BL')  bl += len;
+    else if (fac === 'BKF-CLMB' || fac === 'BKF-SHW') shw += len;
     else if (!graph.edgeCenterline(eid)) local += len;
     else major += len;
   }
-  return { aaa, other, local, major, total };
+  return { aaa, bbl, bl, shw, local, major, total };
 }
 
-function pctRow(label, ft, total, cls) {
-  const pct = total > 0 ? Math.round(100 * ft / total) : 0;
-  return `<div class="${cls}">${pct}% ${escHtml(label)}</div>`;
+// Sub-segment fill colors — MUST stay in sync with the per-tier line
+// colors in src/layers.js so the bar reads as the same legend as the map.
+// "Local streets" is white (rendered with a thin gray stroke so it's
+// visible against the white panel); "Major streets" is a muted red.
+const INFRA_COLORS = {
+  aaa:   '#1F6B3D',
+  bbl:   '#3FA85F',
+  bl:    '#7FCC9C',
+  shw:   '#E07A1F',
+  local: '#ffffff',
+  major: '#d65a5a',
+};
+
+const INFRA_GROUP_META = {
+  aaa:   { label: 'All ages & abilities', pos: 'top' },
+  other: { label: 'Other bike',           pos: 'bot' },
+  local: { label: 'Local streets',        pos: 'top' },
+  major: { label: 'Major streets',        pos: 'bot' },
+};
+
+function infraSummaryBarSvg(b, vbWidth = 320) {
+  // Render the breakdown as a horizontal bar:
+  //   [AAA | BBL | BL | SHW | LOCAL | MAJOR]
+  // Two labels above (AAA, Local) and two below (Other bike, Major), each
+  // with an L-line pointing to its segment. "Other bike" gets a T-shape
+  // bracket spanning all of BBL+BL+SHW when more than one sub-color is
+  // present, so the colors visibly belong together.
+  //
+  // `vbWidth` is the SVG's RENDERED PIXEL WIDTH and is also used as the
+  // viewBox width, so 1 viewBox unit = 1 screen pixel. Result: font
+  // size and bar height stay constant regardless of container width;
+  // only the bar's horizontal extent stretches.
+  if (!b.total) return '';
+  const VB_W = vbWidth;
+  const PAD_X = 6;
+  const BAR_X0 = PAD_X, BAR_X1 = VB_W - PAD_X;
+  const BAR_W = BAR_X1 - BAR_X0;
+
+  // Walk the sub-segments left-to-right and assign x ranges.
+  const subs = [
+    { k: 'aaa',   ft: b.aaa,   group: 'aaa'   },
+    { k: 'bbl',   ft: b.bbl,   group: 'other' },
+    { k: 'bl',    ft: b.bl,    group: 'other' },
+    { k: 'shw',   ft: b.shw,   group: 'other' },
+    { k: 'local', ft: b.local, group: 'local' },
+    { k: 'major', ft: b.major, group: 'major' },
+  ];
+  let cursor = BAR_X0;
+  for (const s of subs) {
+    s.x0 = cursor;
+    s.w  = BAR_W * s.ft / b.total;
+    cursor += s.w;
+    s.x1 = cursor;
+  }
+
+  // One group per category (skipped if its total length is 0).
+  const groups = [];
+  for (const g of Object.keys(INFRA_GROUP_META)) {
+    const ss = subs.filter((s) => s.group === g && s.w > 0);
+    if (!ss.length) continue;
+    const x0 = Math.min(...ss.map((s) => s.x0));
+    const x1 = Math.max(...ss.map((s) => s.x1));
+    const ft = ss.reduce((acc, s) => acc + s.ft, 0);
+    const pct = Math.round(100 * ft / b.total);
+    groups.push({
+      g, x0, x1, center: (x0 + x1) / 2,
+      multi: ss.length > 1,
+      pct,
+      label: `${INFRA_GROUP_META[g].label} · ${pct}%`,
+      pos: INFRA_GROUP_META[g].pos,
+    });
+  }
+
+  // Collapse the unused side's zone when only one side has labels.
+  //   Full layout (both sides):  [top zone 32 | bar 14 | bot zone 36] = 82
+  //   Only top labels (e.g. all-AAA): drop the 36 px bottom zone → 50 px tall.
+  //   Only bot labels (e.g. all-major): drop the 32 px top zone → 54 px tall.
+  // SVG aspect ratio changes, so the rendered height shrinks with the
+  // collapsed viewBox (width stays 100 %).
+  const hasTop = groups.some((g) => g.pos === 'top');
+  const hasBot = groups.some((g) => g.pos === 'bot');
+  const TOP_ZONE = hasTop ? 32 : 4;       // 4 px tiny pad when no top labels
+  const BOT_ZONE = hasBot ? 36 : 4;
+  const BAR_H = 14;
+  const BAR_Y0 = TOP_ZONE;
+  const BAR_Y1 = BAR_Y0 + BAR_H;
+  const VB_H = TOP_ZONE + BAR_H + BOT_ZONE;
+  const TOP_BASELINE = 12;                // label baseline inside top zone
+  const BOT_BASELINE = BAR_Y1 + 28;       // label baseline inside bot zone
+
+  // Estimate label widths from char count (9.5px sans ≈ 5.3 px/char) so
+  // we can clamp them inside the viewBox. Then push same-side labels
+  // apart when they'd overlap. Two labels per side max, so a single
+  // greedy left-to-right pass is sufficient.
+  for (const grp of groups) {
+    const estW = grp.label.length * 5.3 + 4;
+    grp.halfW = estW / 2;
+    grp.labelX = Math.max(grp.halfW, Math.min(VB_W - grp.halfW, grp.center));
+  }
+  for (const side of ['top', 'bot']) {
+    const gs = groups.filter((g) => g.pos === side)
+                     .sort((a, b) => a.labelX - b.labelX);
+    for (let i = 1; i < gs.length; i++) {
+      const prev = gs[i - 1], cur = gs[i];
+      const minGap = prev.halfW + cur.halfW + 4;
+      if (cur.labelX - prev.labelX < minGap) {
+        cur.labelX = prev.labelX + minGap;
+        const maxRight = VB_W - cur.halfW;
+        if (cur.labelX > maxRight) {
+          cur.labelX  = maxRight;
+          prev.labelX = Math.max(prev.halfW, cur.labelX - minGap);
+        }
+      }
+    }
+  }
+
+  // Sub-segment rects.
+  const segRects = subs.filter((s) => s.w > 0).map((s) => {
+    const stroke = s.k === 'local'
+      ? ' stroke="#bbb" stroke-width="0.5"' : '';
+    return `<rect x="${s.x0.toFixed(2)}" y="${BAR_Y0}" `
+         + `width="${Math.max(0.1, s.w).toFixed(2)}" `
+         + `height="${BAR_Y1 - BAR_Y0}" `
+         + `fill="${INFRA_COLORS[s.k]}"${stroke}/>`;
+  }).join('');
+
+  // Connector lines + label text.
+  const parts = [];
+  for (const grp of groups) {
+    const cx = grp.center, lx = grp.labelX;
+    if (grp.pos === 'top') {
+      const ly = TOP_BASELINE + 3;            // just below label baseline
+      const midY = (ly + BAR_Y0) / 2;
+      parts.push(`<polyline points="${lx.toFixed(2)},${ly} ${lx.toFixed(2)},${midY} ${cx.toFixed(2)},${midY} ${cx.toFixed(2)},${BAR_Y0}" class="route-infra-line"/>`);
+    } else {
+      const ly = BOT_BASELINE - 11;           // just above label top
+      if (grp.g === 'other' && grp.multi) {
+        // T-bracket: a horizontal flat side just below the bar, spanning
+        // the whole "other" range, then a stem (L-bent if shifted) down
+        // to the label.
+        const bracketY = BAR_Y1 + 3;
+        const stemMidY = (bracketY + ly) / 2;
+        parts.push(`<polyline points="${grp.x0.toFixed(2)},${bracketY} ${grp.x1.toFixed(2)},${bracketY}" class="route-infra-line"/>`);
+        parts.push(`<polyline points="${cx.toFixed(2)},${bracketY} ${cx.toFixed(2)},${stemMidY} ${lx.toFixed(2)},${stemMidY} ${lx.toFixed(2)},${ly}" class="route-infra-line"/>`);
+      } else {
+        const midY = (BAR_Y1 + ly) / 2;
+        parts.push(`<polyline points="${cx.toFixed(2)},${BAR_Y1} ${cx.toFixed(2)},${midY} ${lx.toFixed(2)},${midY} ${lx.toFixed(2)},${ly}" class="route-infra-line"/>`);
+      }
+    }
+    const baseY = grp.pos === 'top' ? TOP_BASELINE : BOT_BASELINE;
+    parts.push(`<text x="${lx.toFixed(2)}" y="${baseY}" class="route-infra-label" text-anchor="middle">${escHtml(grp.label)}</text>`);
+  }
+
+  // Explicit width/height attrs (in pixels) — the SVG renders 1:1 with
+  // the viewBox, so font-size and bar height stay constant. CSS sets
+  // `width: 100%` to 0, so the inline attribute wins. See style.css.
+  return `<svg class="route-infra-bar" `
+       + `width="${VB_W}" height="${VB_H}" `
+       + `viewBox="0 0 ${VB_W} ${VB_H}" `
+       + `xmlns="http://www.w3.org/2000/svg" `
+       + `role="img" aria-label="Infrastructure breakdown">`
+       + `<g class="route-infra-segs">${segRects}</g>`
+       + parts.join('')
+       + `</svg>`;
 }
 
-function infraSummaryHtml(b, cls) {
-  return pctRow('All ages & abilities', b.aaa,   b.total, cls)
-       + pctRow('Other bike routes',    b.other, b.total, cls)
-       + pctRow('Local streets',        b.local, b.total, cls)
-       + pctRow('Major streets',        b.major, b.total, cls);
+function elevationBlockHtml(state, route, vbWidth = 320) {
+  if (!state.graph?.hasElevation) return '';
+  const series = buildElevationSeries(state.graph, route.result);
+  if (!series || series.elevations.length < 2) return '';
+  const stats = climbStats(series);
+  // vbWidth is the chart's actual pixel width AND its viewBox width
+  // (1:1) so font-size and chart height stay constant regardless of
+  // container width.
+  const svg = elevationProfileSvg(series, { width: vbWidth });
+  if (!svg.area) return '';
+  // Stash on state so hover handlers can find it.
+  state.hoverSeries = series;
+  state.hoverChartGeom = {
+    width: svg.width, height: svg.height, pad: svg.pad,
+    minElev: svg.minElevFt, maxElev: svg.maxElevFt, totalDist: svg.totalDistFt,
+  };
+  // SVG chart: filled brown area under a darker outline. Min/max elevation
+  // labels on the y-axis; total distance is on the directions summary so
+  // the x-axis is implicit. Steepest-grade + total-uphill stats sit
+  // alongside the chart.
+  // The cursor (vertical line + circle) starts hidden and is moved by
+  // the hover handler in attachElevHover() — both chart-mouse and
+  // map-mouse trigger it.
+  const pad = svg.pad;
+  const baseline = svg.height - pad.b;
+  return `
+    <div class="route-elev">
+      <svg class="route-elev-chart"
+           width="${svg.width}" height="${svg.height}"
+           viewBox="0 0 ${svg.width} ${svg.height}"
+           xmlns="http://www.w3.org/2000/svg" aria-label="Elevation profile">
+        <path d="${svg.area}" class="route-elev-fill" />
+        <path d="${svg.line}" class="route-elev-line" />
+        <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${baseline}"
+              class="route-elev-axis" />
+        <line x1="${pad.l}" y1="${baseline}" x2="${svg.width - pad.r}" y2="${baseline}"
+              class="route-elev-axis" />
+        <text x="${pad.l - 4}" y="${pad.t + 8}" class="route-elev-tick" text-anchor="end">${svg.maxElevFt} ft</text>
+        <text x="${pad.l - 4}" y="${baseline}" class="route-elev-tick" text-anchor="end">${svg.minElevFt} ft</text>
+        <line class="route-elev-cursor-line" x1="0" y1="${pad.t}" x2="0" y2="${baseline}"
+              hidden />
+        <circle class="route-elev-cursor-dot" cx="0" cy="0" r="3.5" hidden />
+        <text class="route-elev-cursor-label" x="0" y="0"
+              text-anchor="middle" hidden>
+          <tspan class="route-elev-cursor-elev" x="0" dy="0"></tspan>
+          <tspan class="route-elev-cursor-mi"   x="0" dy="10"></tspan>
+          <tspan class="route-elev-cursor-pct"  x="0" dy="10"></tspan>
+        </text>
+      </svg>
+      <div class="route-elev-stats">
+        <div><b>${stats.totalUphillFt}</b> ft total climb</div>
+        <div><b>${(stats.steepestUphillPct * 100).toFixed(1)}%</b> steepest uphill</div>
+      </div>
+    </div>`;
 }
 
 function renderDirections(state, info) {
@@ -595,20 +936,29 @@ function renderDirections(state, info) {
   }
   const miles = info.totalLengthFt / 5280;
   const mins = predictedMinutes(miles, state.speedMph);
-  // 4-line infrastructure breakdown for the ACTIVE route, always shown
-  // under the min/mi line in the summary block. (Lives outside the tab
-  // strip so it doesn't bloat every tab and stays tied to the route
-  // that's actually rendered as primary.)
+  // Infrastructure bar for the ACTIVE route, always shown under the
+  // min/mi line in the summary block. (Lives outside the tab strip so it
+  // doesn't bloat every tab and stays tied to the route that's actually
+  // rendered as primary.)
   const activeRoute = state.routes[state.activeIndex];
+  // Both summary SVGs render at the directions panel's actual inner
+  // width, with viewBox-W = pixel-W (1:1), so their font-size and
+  // height stay constant across phone/desktop. See infraSummaryBarSvg
+  // and elevationBlockHtml. Cached on state so the resize handler can
+  // re-render if the panel width changes meaningfully.
+  const svgWidth = directionsPanelInnerWidth(state);
+  state.lastDirectionsWidth = svgWidth;
   const summaryPct = activeRoute
-    ? infraSummaryHtml(infraBreakdown(state.graph,
-        activeRoute.result.pathEdgeIds), 'route-summary-pct')
+    ? infraSummaryBarSvg(infraBreakdown(state.graph,
+        activeRoute.result.pathEdgeIds), svgWidth)
     : '';
+  const elevHtml = activeRoute ? elevationBlockHtml(state, activeRoute, svgWidth) : '';
   const summary = `
     <div class="route-summary">
       <b>${mins} min</b> · ${miles.toFixed(2)} mi
       ${summaryPct}
-    </div>`;
+    </div>
+    ${elevHtml}`;
 
   const stepsHtml = info.steps.map((s) => {
     const dist = s.distanceFt > 0 ? formatDistance(s.distanceFt) : '';
@@ -634,12 +984,65 @@ function renderDirections(state, info) {
       });
     });
   }
+  // Wire the chart-hover handler each render (the SVG is re-built every
+  // time the panel rerenders). The map-hover handler is bound once at
+  // boot and reads state.hoverSeries — refreshed by elevationBlockHtml.
+  attachChartHoverHandlers(state);
 }
 
 function setPanel(state, html) {
   if (!state.panel) return;
   state.panel.hidden = false;
   state.panel.innerHTML = html;
+}
+
+// Pixel width to render the summary SVGs at. Used as both the SVG's
+// `width` attribute and its viewBox width, so 1 viewBox unit = 1
+// screen pixel — font-size and bar/chart heights stay constant across
+// desktop and phone widths.
+//
+// Prefer the panel's measured clientWidth; fall back to the panel
+// container width before first paint. The values are clamped so a
+// transient 0 (e.g. while #directions-panel is still hidden=true)
+// doesn't render a zero-width SVG.
+function directionsPanelInnerWidth(state) {
+  if (state.panel) {
+    // Force layout-known geometry: ensure panel is visible before
+    // measuring. (`renderDirections` flips `hidden = false` via setPanel
+    // AFTER computing this width, so we have to peek manually here.)
+    const wasHidden = state.panel.hidden;
+    if (wasHidden) state.panel.hidden = false;
+    const measured = state.panel.clientWidth;
+    if (wasHidden) state.panel.hidden = true;
+    if (measured >= 200) return measured;
+  }
+  // Fallback when we can't measure (e.g. boot): use the known #left-stack
+  // width on desktop, viewport minus sheet padding on mobile.
+  if (window.matchMedia('(max-width: 719px)').matches) {
+    return Math.max(280, window.innerWidth - 20);
+  }
+  return 360;
+}
+
+// Re-render the active route's panel when the viewport resizes if the
+// directions-panel width changed meaningfully. Without this, the SVGs
+// would keep their initial-render width (fine on desktop, but rotating
+// a phone or dragging the window would leave them mis-sized).
+function attachDirectionsResizeHandler(state) {
+  let pending = 0;
+  window.addEventListener('resize', () => {
+    if (pending) cancelAnimationFrame(pending);
+    pending = requestAnimationFrame(() => {
+      pending = 0;
+      if (!state.routes.length) return;
+      const w = directionsPanelInnerWidth(state);
+      // Skip re-render unless the width drifted enough to matter (>= 4 px).
+      // This keeps mobile-keyboard-show events and other tiny resizes
+      // from thrashing the panel.
+      if (Math.abs((state.lastDirectionsWidth ?? 0) - w) < 4) return;
+      renderPrimary(state);
+    });
+  });
 }
 
 function resetRoute(state) {
@@ -649,6 +1052,8 @@ function resetRoute(state) {
   for (const m of state.altMarkers)  m.remove();
   state.stepMarkers = []; state.altMarkers = [];
   state.routes = [];
+  state.hoverSeries = null;
+  hideHoverCursor(state);
   state.startSpec = null; state.endSpec = null;
   state.startLabel = ''; state.endLabel = '';
   if (state.map.getSource(ROUTE_SOURCE)) {
@@ -929,6 +1334,11 @@ function setupSearchInput(state, inputId, dropId, opts) {
   };
 
   input.addEventListener('focus', () => {
+    // On mobile: expand the bottom sheet so the suggestion dropdown has
+    // room to render inside the sheet's scrollable area. Only meaningful
+    // for the routing-endpoint inputs; the settings inputs are inside
+    // their own modal.
+    if (opts.role === 'endpoint') snapSheet('full');
     const q = input.value.trim();
     if (q.length < 2) {
       currentRows = optionRows();
@@ -1019,6 +1429,10 @@ function prettyCategory(c) {
 function beginChooseOnMap(state, which) {
   setMode({ which });
   document.body.classList.add('choosing-on-map');
+  showChooseBanner(which);
+  // On mobile, collapse the sheet so the user can actually see the map
+  // they need to tap.
+  snapSheet('peek');
 }
 
 function finishChooseOnMap(state, which, spec, lon, lat, label) {
@@ -1030,11 +1444,30 @@ function cancelChooseOnMap() {
   if (!isChoosingOnMap()) return;
   clearMode();
   document.body.classList.remove('choosing-on-map');
+  hideChooseBanner();
+}
+
+function showChooseBanner(which) {
+  const el = document.getElementById('choose-on-map-banner');
+  if (!el) return;
+  const msg = el.querySelector('.cob-msg');
+  if (msg) msg.textContent = which === 'start'
+    ? 'Tap the map to set start'
+    : 'Tap the map to set end';
+  el.hidden = false;
+}
+
+function hideChooseBanner() {
+  const el = document.getElementById('choose-on-map-banner');
+  if (el) el.hidden = true;
 }
 
 function wireGlobalChooseInteractions(state) {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') cancelChooseOnMap();
+  });
+  document.getElementById('cob-cancel')?.addEventListener('click', () => {
+    cancelChooseOnMap();
   });
 }
 
@@ -1144,7 +1577,7 @@ function applyCustomEnabledUI(state) {
 // each layer from view). Called both at boot and from the Settings
 // toggle's change handler.
 function applyDebugEnabledUI(state, { forceClearOnDisable = false } = {}) {
-  const fs = document.getElementById('layers-debug-fieldset');
+  const fs = document.getElementById('layers-debug-section');
   if (fs) fs.hidden = !state.debugEnabled;
   if (!state.debugEnabled && forceClearOnDisable) {
     for (const id of DEBUG_TOGGLE_IDS) {
@@ -1174,7 +1607,7 @@ function wirePresetUI(state) {
     panel.innerHTML = SLIDERS.map((s) => `
       <label class="slider-row" for="slider-${s.key}" title="${escHtml(s.hint)}">
         <span class="slider-label">${escHtml(s.label)}</span>
-        <input type="range" id="slider-${s.key}" min="0" max="1" step="0.05"
+        <input type="range" id="slider-${s.key}" min="0" max="1" step="0.1"
                value="${state.customSliders[s.key]}" />
         <span class="slider-val" id="slider-val-${s.key}">${formatSliderVal(state.customSliders[s.key])}</span>
       </label>`).join('');
@@ -1183,7 +1616,7 @@ function wirePresetUI(state) {
       const out   = document.getElementById(`slider-val-${s.key}`);
       input.addEventListener('input', () => {
         state.customSliders[s.key] = Number(input.value);
-        out.textContent = formatSliderVal(state.customSliders[s.key]);
+        out.innerHTML = formatSliderVal(state.customSliders[s.key]);
       });
       input.addEventListener('change', () => {
         saveCustomToStorage(state.customSliders);
@@ -1205,7 +1638,10 @@ function setPresetUI(state) {
   });
 }
 
-function formatSliderVal(v) { return Number(v).toFixed(2); }
+function formatSliderVal(v) {
+  const n = Math.round(Number(v) * 10);
+  return `${n}<span class="slider-val-denom">/10</span>`;
+}
 
 // ---------- localStorage ----------
 
@@ -1270,7 +1706,7 @@ function saveLocToStorage(key, loc) {
 function loadSpeedFromStorage() {
   try {
     const v = Number(localStorage.getItem(LS_SPEED));
-    if (Number.isFinite(v) && v >= 4 && v <= 25) return v;
+    if (Number.isFinite(v) && v >= 5 && v <= 20) return v;
   } catch {}
   return DEFAULT_SPEED_MPH;
 }
@@ -1278,29 +1714,81 @@ function saveSpeedToStorage(mph) {
   try { localStorage.setItem(LS_SPEED, String(mph)); } catch {}
 }
 
-// ---------- graph debug layer (toggleable visualization) ----------
+// ---------- graph debug layers (toggleable visualizations) ----------
 //
 // Renders the routing graph as it actually sits in memory: every directed
 // edge as a line (deduped by underlying geometry index, so forward + reverse
 // share one feature) and every node as a small circle. Useful for spotting
 // snap targets, isolated trail islands, and edge-coverage gaps.
-// The layers are added lazily (after the graph loads) and their visibility
-// is driven by the VisibilityManager binding in main.js.
+//
+// Two layers share one edge source:
+//   - graph-debug-edges     colored by absolute DTM slope (DTM sampled
+//                           at edge endpoints; |Δelev| / lengthFt, signed
+//                           value also stored as `slopePct` for inspection)
+//   - graph-osm-tags-debug  colored by OSM elevation-related tag
+//                           (bridge / tunnel / default)
+// Both are added lazily (after the graph loads); visibility is driven by
+// the VisibilityManager bindings in main.js.
 
 function addGraphDebugLayers(map, graph) {
-  // Edges: dedupe by geomIndex so we don't draw the same line twice.
-  const edgeFeatures = [];
-  const seen = new Set();
+  // Walk all directed edges, dedupe by geomIndex, prefer the forward edge
+  // for each geom so slope sign matches the geometry's drawn direction.
+  const geomToEdgeId = new Map();
   for (let i = 0; i < graph.edgeCount; i++) {
     const gIdx = graph.edgeGeomIndex(i);
-    if (seen.has(gIdx)) continue;
-    seen.add(gIdx);
+    const isForward = !graph.e.geomRev[i];
+    if (!geomToEdgeId.has(gIdx)) {
+      geomToEdgeId.set(gIdx, i);
+    } else if (isForward && graph.e.geomRev[geomToEdgeId.get(gIdx)]) {
+      geomToEdgeId.set(gIdx, i);
+    }
+  }
+
+  const edgeFeatures = [];
+  for (const [gIdx, edgeId] of geomToEdgeId) {
+    const lenFt = graph.edgeLengthFt(edgeId);
+    const fromId = graph.edgeFrom(edgeId);
+    const toId   = graph.edgeTo(edgeId);
+    const fromElev = graph.nodeElev(fromId);
+    const toElev   = graph.nodeElev(toId);
+    // Signed slope in percent, going from geom-start to geom-end.
+    // Note: with all node elevations = 0, this is just 0 until a v3
+    // pipeline writes real data — but the layer is wired to it now so it
+    // lights up automatically once data lands.
+    const slopePct = lenFt > 0
+      ? ((toElev - fromElev) / lenFt) * 100
+      : 0;
+    // Classify by OSM elevation-related tag with a fixed priority. By
+    // construction `untagged-crossing` and `approach` only fire on
+    // edges with no other elevation tag; the ordering below is mostly
+    // documentary — first match wins. `untagged-crossing` outranks
+    // `approach` because it signals an OSM tagging gap (data quality
+    // issue) rather than expected structure proximity.
+    const layer = graph.edgeLayer(edgeId);
+    let osmTag;
+    if (graph.edgeIsUntaggedCrossing(edgeId))      osmTag = 'untagged-crossing';
+    else if (graph.edgeIsBridge(edgeId))           osmTag = 'bridge';
+    else if (graph.edgeIsTunnel(edgeId))           osmTag = 'tunnel';
+    else if (layer != null && layer !== 0)         osmTag = 'layered';
+    else if (graph.edgeIsEmbankment(edgeId))       osmTag = 'embankment';
+    else if (graph.edgeIsCutting(edgeId))          osmTag = 'cutting';
+    else if (graph.edgeIsCovered(edgeId))          osmTag = 'covered';
+    else if (graph.edgeIsIndoor(edgeId))           osmTag = 'indoor';
+    else if (graph.edgeIsApproach(edgeId)) {
+      const src = graph.edgeApproachOf(edgeId) || 'bridge';
+      osmTag = `approach-of-${src}`;
+    } else                                          osmTag = 'default';
     edgeFeatures.push({
       type: 'Feature',
       geometry: { type: 'LineString', coordinates: graph.geoms[gIdx] },
-      properties: {},
+      properties: {
+        slopePct: Math.round(slopePct * 100) / 100,
+        osmTag,
+        layer: layer ?? 0,
+      },
     });
   }
+
   const nodeFeatures = [];
   for (let i = 0; i < graph.nodeCount; i++) {
     nodeFeatures.push({
@@ -1314,14 +1802,27 @@ function addGraphDebugLayers(map, graph) {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: edgeFeatures },
   });
+  // Color steps by |slopePct| in percent. Calibrated against Seattle's
+  // 26% steepest-real-street ceiling: ≥20% is "off-the-chart" purple.
+  // Cycling-comfort thresholds: ≤3% gentle, 3-6% moderate, 6-10% hilly,
+  // 10%+ steep. When elevation is all zero, every edge is gray.
   map.addLayer({
     id: 'graph-debug-edges',
     type: 'line',
     source: 'graph-debug-edges',
     paint: {
-      'line-color': '#ff00aa',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.4, 16, 1.2],
-      'line-opacity': 0.55,
+      'line-color': [
+        'step', ['abs', ['get', 'slopePct']],
+        '#dddddd',          // 0-1%   essentially flat
+        1,  '#81c784',      // 1-3%   gentle
+        3,  '#fff176',      // 3-6%   moderate
+        6,  '#ffa726',      // 6-10%  hilly
+        10, '#ef5350',      // 10-15% steep
+        15, '#b71c1c',      // 15-20% very steep
+        20, '#4a148c',      // 20%+   extreme (above Seattle's real max)
+      ],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 2.0],
+      'line-opacity': 0.85,
     },
     // Initial visibility 'none' — the VisibilityManager flips it based on
     // the persisted checkbox state in the next apply() call.
@@ -1340,6 +1841,47 @@ function addGraphDebugLayers(map, graph) {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 3],
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 0.5,
+    },
+    layout: { visibility: 'none' },
+  });
+
+  // Sibling layer over the same edge source: paint edges by OSM elevation-
+  // related categorical tag. Useful for v3 planning — these are the spans
+  // where a raw DTM sample is most likely to be wrong, plus a derived
+  // "untagged-crossing" data-quality flag for ambiguous geometry.
+  map.addLayer({
+    id: 'graph-osm-tags-debug',
+    type: 'line',
+    source: 'graph-debug-edges',
+    paint: {
+      'line-color': [
+        'match', ['get', 'osmTag'],
+        // hot pink — derived data-quality flag: this edge 2D-crosses
+        // another way-segment (no shared node) but carries no elevation
+        // tag of its own. The other way may or may not be tagged.
+        'untagged-crossing', '#ec407a',
+        'bridge',            '#d32f2f',   // red    — elevated, DTM unreliable
+        'tunnel',            '#1565c0',   // blue   — buried, DTM samples surface above
+        'layered',           '#8e24aa',   // purple — OSM layer=±N, no bridge/tunnel tag
+        'embankment',        '#6d4c41',   // brown  — raised earthwork; DTM is correct
+        'cutting',           '#455a64',   // slate  — sub-grade cut; DTM is correct
+        'covered',           '#f9a825',   // amber  — sheltered (arcade / awning)
+        'indoor',            '#00897b',   // teal   — inside a building
+        // Derived "approach" flag: untagged edges within ~200 ft graph-
+        // walk distance of a tagged source. Painted in a desaturated /
+        // pastel version of the source category's color so you can see
+        // what each approach attaches to.
+        'approach-of-bridge',     '#ffcdd2', // light red
+        'approach-of-tunnel',     '#bbdefb', // light blue
+        'approach-of-layered',    '#d1c4e9', // light purple
+        'approach-of-embankment', '#d7ccc8', // light brown
+        'approach-of-cutting',    '#cfd8dc', // light slate
+        'approach-of-covered',    '#fff9c4', // light amber
+        'approach-of-indoor',     '#b2dfdb', // light teal
+        '#9e9e9e',                        // default gray
+      ],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 2.0],
+      'line-opacity': 0.85,
     },
     layout: { visibility: 'none' },
   });

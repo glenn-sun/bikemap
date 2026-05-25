@@ -300,10 +300,17 @@ export function findPathsMulti(primaryWeights, graph, startSpec, endSpec,
   // keep the one LESS similar to the primary (more informative alternate).
   // Sort by simToPrimary ascending so the most-different twists come first.
   survivors.sort((a, b) => a.simToPrimary - b.simToPrimary);
-  const kept = [];
+  let kept = [];
   for (const s of survivors) {
     if (kept.some((k) => jaccardOverlap(k.geomSet, s.geomSet) > overlapThreshold)) continue;
     kept.push(s);
+  }
+  // Step 4: cap at 2 twists (3 routes total counting primary). When all
+  // three twists genuinely survived filtering, drop "Flatter" since the
+  // primary + Quieter + More direct trio already spans the comfort-vs-
+  // directness axis the user is most likely choosing between.
+  if (kept.length >= 3 && kept.some((k) => k.id === 'flatter')) {
+    kept = kept.filter((k) => k.id !== 'flatter');
   }
 
   for (const k of kept) {

@@ -10,6 +10,7 @@
 import maplibregl from 'maplibre-gl';
 import { isChoosingOnMap } from './routing/mode.js';
 import { routeFromMyLocationTo } from './routing/ui.js';
+import { snapSheet } from './sheet.js';
 
 // POI-style layers that get a "Go" button in their popup. Linear bike
 // infrastructure and routing-debug overlays are excluded — they aren't
@@ -219,10 +220,15 @@ export function attachPopups(map) {
       const html = formatters[layerId](f.properties);
       if (!html || !html.trim()) return;
       const ll = pointFromFeature(f, e.lngLat);
-      const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '320px' })
+      const popup = new maplibregl.Popup({
+        closeButton: true,
+        maxWidth: 'min(320px, calc(100vw - 24px))',
+      })
         .setLngLat(ll)
         .setHTML(`<div class="pop">${html}</div>`)
         .addTo(map);
+      // On mobile, collapse the sheet so the popup isn't covered.
+      snapSheet('peek');
       if (POI_LAYERS.has(layerId)) {
         const popEl = popup.getElement()?.querySelector('.pop');
         if (popEl) {

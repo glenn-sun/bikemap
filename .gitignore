@@ -4,3 +4,5 @@ dist/
 .DS_Store
 .har-archive/
 *.log
+dsm_cache/
+dtm_cache/

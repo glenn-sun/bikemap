@@ -157,6 +157,8 @@ export async function addDataLayers(map, beforeId = undefined) {
     community_centers: 'community_centers',
     libraries: 'libraries',
     light_rail_stations: 'light_rail_stations',
+    // Terrain: 25-ft elevation contour lines (every 100 ft marked as index).
+    contours: 'contours',
     // Routing prototype: visual-verification sources. All start hidden; users
     // toggle them on to sanity-check the data feeding the routing graph.
     signals: 'signals',
@@ -167,6 +169,64 @@ export async function addDataLayers(map, beforeId = undefined) {
   for (const [id, name] of Object.entries(sources)) {
     map.addSource(id, { type: 'geojson', data: DATA(name) });
   }
+
+  // ---------- terrain contour lines ----------
+  // Drawn near the BOTTOM of the data stack (just above basemap fills) so
+  // bike infrastructure, route lines, and POIs all read on top. Two layers
+  // by `index` property: thicker every-100-ft "index" contours always
+  // visible from z11+, thin in-between 25-ft contours fade in from z13.
+  // The pre-route-line ordering means a route still draws over them.
+  add({
+    id: 'contours-thin',
+    type: 'line',
+    source: 'contours',
+    filter: ['==', ['get', 'index'], 0],
+    minzoom: 12.5,
+    paint: {
+      'line-color': '#9b7355',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 12.5, 0.3, 16, 0.7],
+      'line-opacity': ['interpolate', ['linear'], ['zoom'], 12.5, 0.0, 13.5, 0.45, 16, 0.55],
+    },
+    layout: { visibility: 'none' },
+  });
+  add({
+    id: 'contours-index',
+    type: 'line',
+    source: 'contours',
+    filter: ['==', ['get', 'index'], 1],
+    minzoom: 10.5,
+    paint: {
+      'line-color': '#7d5a3a',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.6, 14, 1.1, 16, 1.5],
+      'line-opacity': ['interpolate', ['linear'], ['zoom'], 11, 0.35, 13, 0.55, 16, 0.7],
+    },
+    layout: { visibility: 'none' },
+  });
+  // Elevation labels along the index contours — appear from z14 so they
+  // don't crowd low-zoom views. `symbol-placement: line` repeats the label
+  // along the line every `symbol-spacing` pixels.
+  add({
+    id: 'contours-labels',
+    type: 'symbol',
+    source: 'contours',
+    filter: ['==', ['get', 'index'], 1],
+    minzoom: 13.5,
+    layout: {
+      'symbol-placement': 'line',
+      'symbol-spacing': 250,
+      'text-field': ['concat', ['to-string', ['get', 'elev_ft']], ' ft'],
+      'text-font': ['Noto Sans Italic'],
+      'text-size': ['interpolate', ['linear'], ['zoom'], 13.5, 9, 16, 11],
+      'text-rotation-alignment': 'map',
+      'text-pitch-alignment': 'viewport',
+      'visibility': 'none',
+    },
+    paint: {
+      'text-color': '#5d4220',
+      'text-halo-color': '#ffffff',
+      'text-halo-width': 1.4,
+    },
+  });
 
   // ---------- line layers, bottom -> top ----------
 
@@ -453,4 +513,5 @@ export async function addDataLayers(map, beforeId = undefined) {
     },
     layout: { visibility: 'none' },
   });
+
 }

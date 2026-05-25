@@ -15,7 +15,7 @@ body {
   font-family: 'Material Symbols Outlined';
   font-weight: normal;
   font-style: normal;
-  font-size: 18px;
+  font-size: 20px;
   display: inline-block;
   line-height: 1;
   letter-spacing: normal;
@@ -28,6 +28,28 @@ body {
 }
 
 /* ============ Shared panel chrome ============ */
+
+/* Pill background + shadow shared by the three white floating panels
+ * (#app-header / #routing-panel + #directions-panel / #layers-panel)
+ * AND by the settings <dialog>'s sections via the same `.panel-section`
+ * idea. Override per-panel only where positioning or width differs. */
+#app-header,
+#routing-panel,
+#directions-panel,
+#layers-panel {
+  background: rgba(255, 255, 255, 0.94);
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  font-size: 13px;
+  color: #222;
+  user-select: none;
+}
+/* Sections own their own padding — keep panel padding minimal. */
+#routing-panel,
+#directions-panel,
+#layers-panel {
+  padding: 0;
+}
 
 #left-stack {
   position: absolute;
@@ -43,15 +65,6 @@ body {
   max-height: calc(100vh - 60px);
 }
 
-#routing-panel, #directions-panel, #layers-panel {
-  background: rgba(255, 255, 255, 0.94);
-  padding: 6px 10px 10px;
-  border-radius: 6px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-  font-size: 12px;
-  user-select: none;
-}
-
 #routing-panel { flex-shrink: 0; }
 #directions-panel {
   flex: 1 1 auto;
@@ -59,50 +72,69 @@ body {
   overflow-y: auto;
 }
 
+/* Layers panel — same pill chrome at top-right; mobile turns it into
+ * a full-screen overlay via @media below. */
 #layers-panel {
   position: absolute;
   top: 10px;
-  right: 60px;          /* leaves room for MapLibre's NavigationControl */
-  width: 210px;
+  right: 50px;          /* leaves room for MapLibre's NavigationControl */
+  width: 240px;
   max-height: calc(100vh - 20px);
   overflow-y: auto;
   z-index: 1;
 }
 
-#routing-panel fieldset, #layers-panel fieldset {
-  border: none;
-  padding: 0;
-  margin: 0 0 6px 0;
+#layers-panel input[type=checkbox],
+#routing-panel input[type=checkbox] {
+  accent-color: #e91e63;
 }
-#routing-panel fieldset:last-of-type, #layers-panel fieldset:last-child {
-  margin-bottom: 0;
+
+/* The layers-panel internal header is hidden on desktop (the panel
+ * shows no title in the corner). It surfaces on mobile via @media. */
+#layers-panel-header { display: none; }
+
+/* ============ Section primitive ============
+ * All grouped controls — Directions / Riding style inside the routing
+ * panel, Bike infrastructure / Terrain / etc. inside layers, Saved
+ * locations / Cycling speed / etc. inside settings — share the same
+ * markup: <section class="panel-section"><h3>Title</h3>…</section>.
+ * One rule, one look. */
+.panel-section {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f0f0f0;
 }
-#routing-panel legend, #layers-panel legend {
+.panel-section:last-of-type { border-bottom: none; }
+.panel-section[hidden] { display: none; }
+.panel-section h3 {
+  margin: 0 0 6px;
   font-weight: 600;
-  font-size: 11px;
+  font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #555;
-  padding: 4px 0 2px;
 }
-#layers-panel label {
+/* Inside the layers panel checkbox list, give each row a little
+ * breathing room. */
+#layers-panel .panel-section label {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   cursor: pointer;
-  padding: 1px 0;
+  padding: 2px 0;
 }
+
+#layers-panel .panel-section { padding: 12px 16px; }
 
 /* ============ Popups (per-layer) ============ */
 
 .pop {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.4;
   color: #222;
 }
-.pop-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.pop-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
 .pop-row { margin-top: 2px; }
-.pop-key { color: #666; font-size: 11px; margin-right: 4px; }
+.pop-key { color: #666; font-size: 12px; margin-right: 4px; }
 .pop a { color: #1e88e5; text-decoration: none; }
 .pop a:hover { text-decoration: underline; }
 
@@ -110,7 +142,7 @@ body {
  * location to the popup's feature. */
 .pop-go-btn {
   margin-top: 8px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   padding: 5px 12px;
   border: none;
@@ -124,7 +156,7 @@ body {
 }
 .pop-go-btn:hover { background: #c2185b; }
 .pop-go-btn:disabled { background: #ccc; cursor: not-allowed; }
-.pop-go-btn .material-symbols-outlined { font-size: 14px; }
+.pop-go-btn .material-symbols-outlined { font-size: 16px; }
 
 /* Blue dot showing the user's current GPS position. Tracks the same
  * pattern as Google Maps' "you are here" indicator. Sized to roughly
@@ -146,13 +178,14 @@ body {
   box-sizing: border-box;
   width: 100%;
   padding: 5px 7px;
-  font-size: 12px;
+  font-size: 14px;
+  font-family: inherit;
   border: 1px solid #bbb;
   border-radius: 4px;
   outline: none;
   background: #fff;
 }
-.addr-input::placeholder { color: #999; font-size: 11px; }
+.addr-input::placeholder { color: #999; font-size: 14px; }
 .addr-input:focus { border-color: #e91e63; box-shadow: 0 0 0 1px #e91e6333; }
 
 .addr-suggestions {
@@ -167,7 +200,7 @@ body {
   border: 1px solid #bbb;
   border-radius: 4px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
-  font-size: 12px;
+  font-size: 13px;
   z-index: 5;
   max-height: 280px;
   overflow-y: auto;
@@ -183,36 +216,65 @@ body {
 .addr-sugg:last-child { border-bottom: none; }
 .addr-sugg:hover, .addr-sugg.active { background: #fce4ec; }
 .addr-sugg-text { color: #222; display: inline-flex; align-items: center; gap: 4px; }
-.addr-sugg-sub  { color: #888; font-size: 10.5px; padding-left: 22px; }
-.addr-sugg-cat  { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
+.addr-sugg-sub  { color: #888; font-size: 12px; padding-left: 22px; }
+.addr-sugg-cat  { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
 
 .addr-sugg.option-row { background: #fafafa; }
 .addr-sugg.option-row.active, .addr-sugg.option-row:hover { background: #fce4ec; }
 .addr-sugg.option-row .material-symbols-outlined {
-  font-size: 16px;
+  font-size: 17px;
   color: #e91e63;
   width: 18px;
 }
 .addr-sugg.option-row.disabled .addr-sugg-sub { color: #aaa; font-style: italic; }
 
-/* ============ App title bar (top of routing-panel) ============ */
+/* ============ App title bar ============
+ * Top-level sibling of #sheet (not a child) — see comment in
+ * index.html. Desktop: own pill at top-left, sitting just above
+ * #left-stack. Mobile (@media): fixed full-width bar at viewport top. */
 
 #app-header {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  width: 360px;
+  /* Pin the height explicitly so the visual gap between the title bar
+   * and the routing panel below stays equal to #left-stack's 6 px
+   * inter-panel flex gap. (Box-sizing border-box: padding fits inside
+   * the 40 px height. The 28 px chrome buttons are the tallest child;
+   * 28 + 6 + 6 = 40 fits cleanly.) */
+  height: 40px;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin: 2px 0 6px;
-  padding: 0 0 6px;
-  border-bottom: 1px solid #eee;
+  margin: 0;
+  padding: 6px 10px;
 }
 .app-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.01em;
   color: #222;
   line-height: 1.2;
+}
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Push #left-stack below the app-header pill, gap matches its own
+ * inter-panel `gap: 6px` so the visual rhythm is consistent
+ * (title → routing → directions all 6 px apart). max-height shrinks
+ * by the same offset so the bottom-left ScaleControl clearance is
+ * preserved. */
+#left-stack {
+  top: 56px;                              /* 10 (app-header top) + 40 (header height) + 6 (gap) */
+  max-height: calc(100vh - 106px);        /* 60 (ScaleControl) + 46 (app-header + gap push) */
 }
 
 /* ============ Route style segmented control ============ */
@@ -223,6 +285,7 @@ body {
   border-radius: 6px;
   overflow: hidden;
   background: #fff;
+  margin-top: 2px;
 }
 .segmented-control input[type="radio"] {
   position: absolute;
@@ -233,7 +296,7 @@ body {
   flex: 1;
   text-align: center;
   padding: 6px 8px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   color: #333;
@@ -278,7 +341,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   margin-bottom: 6px;
 }
@@ -314,7 +377,7 @@ body {
   flex-shrink: 0;
 }
 #swap-endpoints:hover { background: #ececec; color: #222; }
-#swap-endpoints .material-symbols-outlined { font-size: 16px; }
+#swap-endpoints .material-symbols-outlined { font-size: 17px; }
 
 .route-loc-row {
   display: grid;
@@ -336,12 +399,13 @@ body {
   justify-content: center;
 }
 .route-loc-row button:hover { background: #f0f0f0; color: #b03030; }
-.route-loc-row button .material-symbols-outlined { font-size: 16px; }
+.route-loc-row button .material-symbols-outlined { font-size: 17px; }
 
-/* ============ Settings gear (lives in #app-header) ============ */
-
-#open-settings {
-  font-size: 11px;
+/* ============ Chrome buttons (#open-settings, #layers-fab) ============ */
+/* Shared visual: 28×28 square, light bg, thin border, neutral icon. */
+#open-settings,
+#layers-fab {
+  font-size: 12px;
   padding: 0;
   width: 28px;
   height: 28px;
@@ -355,8 +419,28 @@ body {
   color: #555;
   flex-shrink: 0;
 }
-#open-settings:hover { background: #ececec; color: #222; }
-#open-settings .material-symbols-outlined { font-size: 18px; }
+#open-settings:hover,
+#layers-fab:hover { background: #ececec; color: #222; }
+#open-settings .material-symbols-outlined,
+#layers-fab .material-symbols-outlined { font-size: 20px; }
+
+/* Layers FAB shows on both desktop and mobile. On desktop, clicking
+ * toggles #layers-panel visibility (default: visible → button shows
+ * pink to indicate active). On mobile it opens the full-screen overlay
+ * (which has its own close X). The .active class is managed by
+ * wireLayersModal() in src/main.js and reflects current panel
+ * visibility on both viewports. */
+#layers-fab.active,
+#layers-fab.active:hover {
+  background: #e91e63;
+  border-color: #e91e63;
+  color: #fff;
+}
+#layers-fab.active:active { background: #c2185b; border-color: #c2185b; color: #fff; }
+
+/* Desktop-only "user dismissed the layers panel" state. The default
+ * is visible (no class); .layers-hidden takes it out of the layout. */
+#layers-panel.layers-hidden { display: none; }
 
 /* Crosshair cursor during click-to-place mode. No banner; pressing Escape
  * cancels (see ui.js wireGlobalChooseInteractions). */
@@ -371,7 +455,7 @@ body {
   border-radius: 8px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
   padding: 0;
-  font-size: 13px;
+  font-size: 14px;
   color: #222;
 }
 #settings-modal::backdrop {
@@ -384,15 +468,11 @@ body {
   padding: 12px 16px;
   border-bottom: 1px solid #eee;
 }
-#settings-modal h2 { margin: 0; font-size: 16px; }
-#settings-modal h3 {
-  margin: 0 0 6px;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #555;
-}
-#settings-close {
+#settings-modal h2 { margin: 0; font-size: 18px; }
+/* #settings-modal h3 styling is provided by the shared `.panel-section h3`
+ * rule above. */
+#settings-close,
+#layers-panel-close {
   background: none;
   border: none;
   cursor: pointer;
@@ -400,12 +480,15 @@ body {
   padding: 4px;
   display: inline-flex;
 }
-#settings-close:hover { color: #222; }
-#settings-close .material-symbols-outlined { font-size: 22px; }
+#settings-close:hover,
+#layers-panel-close:hover { color: #222; }
+#settings-close .material-symbols-outlined,
+#layers-panel-close .material-symbols-outlined { font-size: 24px; }
 
-.settings-section { padding: 12px 16px; border-bottom: 1px solid #f0f0f0; }
-.settings-section:last-child { border-bottom: none; }
-.settings-hint { color: #777; font-size: 11px; margin: 0 0 8px; }
+/* Settings modal sections use the shared .panel-section class.
+ * Override only the per-modal padding for more breathing room. */
+#settings-modal .panel-section { padding: 12px 16px; }
+.settings-hint { color: #777; font-size: 12px; margin: 0 0 8px; }
 
 .settings-loc-row {
   display: grid;
@@ -414,7 +497,17 @@ body {
   gap: 8px;
   margin-bottom: 6px;
 }
-.settings-loc-row label { font-weight: 500; }
+.settings-loc-row label {
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.settings-loc-row label .material-symbols-outlined {
+  font-size: 17px;
+  color: #e91e63;
+  width: 18px;
+}
 .settings-loc-row button {
   background: none;
   border: none;
@@ -428,10 +521,10 @@ body {
   justify-content: center;
 }
 .settings-loc-row button:hover { background: #f0f0f0; color: #b03030; }
-.settings-loc-row button .material-symbols-outlined { font-size: 16px; }
+.settings-loc-row button .material-symbols-outlined { font-size: 17px; }
 .settings-loc-row .addr-input-wrap { margin: 0; }
 
-.attrib-list { margin: 0; padding-left: 18px; font-size: 11.5px; color: #555; }
+.attrib-list { margin: 0; padding-left: 18px; font-size: 13px; color: #555; }
 .attrib-list li { margin-bottom: 2px; }
 .attrib-list a { color: #1e88e5; text-decoration: none; }
 .attrib-list a:hover { text-decoration: underline; }
@@ -453,12 +546,16 @@ body {
   align-items: center;
   gap: 0 8px;
 }
-.slider-row .slider-label { grid-column: 1; grid-row: 1; font-size: 12px; color: #333; }
+.slider-row .slider-label { grid-column: 1; grid-row: 1; font-size: 13px; color: #333; }
 .slider-row .slider-val {
   grid-column: 2; grid-row: 1;
-  font-size: 11px; color: #666;
-  min-width: 28px; text-align: right;
+  font-size: 13px; color: #333;
+  min-width: 36px; text-align: right;
   font-variant-numeric: tabular-nums;
+}
+.slider-row .slider-val-denom {
+  font-size: 12px;
+  color: #888;
 }
 .slider-row input[type="range"] {
   grid-column: 1 / span 2; grid-row: 2;
@@ -478,8 +575,8 @@ body {
  * step list. */
 .route-tabs {
   list-style: none;
-  margin: 0 -10px 8px;
-  padding: 0;
+  margin: 0;
+  padding: 2px 0 0;
   display: flex;
   gap: 2px;
   border-bottom: 1px solid #e3e3e3;
@@ -491,7 +588,7 @@ body {
   text-align: center;
   border-bottom: 2px solid transparent;
   color: #555;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.25;
 }
 .route-tab:hover { background: #fce4ec; }
@@ -499,7 +596,7 @@ body {
 .route-tab .route-tab-mi   { color: #888; font-variant-numeric: tabular-nums; }
 .route-tab .route-tab-pct {
   color: #777;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.3;
   font-variant-numeric: tabular-nums;
   margin-top: 1px;
@@ -507,10 +604,40 @@ body {
 .route-tab.active .route-tab-pct { color: #ad1457; }
 .route-summary .route-summary-pct {
   color: #555;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
+}
+
+/* Horizontal infrastructure bar in the route summary block. SVG is
+ * The SVG is generated with explicit pixel `width` and `height`
+ * attributes matching its viewBox, so 1 viewBox unit = 1 screen pixel
+ * (font-size, bar height, label position stay constant across screen
+ * widths). The infraSummaryBarSvg builder computes the pixel width
+ * from the directions panel's actual width at render time, and re-
+ * renders on window resize. Sub-segment rects are colored to match
+ * the per-tier line colors used on the map. */
+.route-summary .route-infra-bar {
+  display: block;
+  margin: 8px 0 4px;
+  overflow: visible;
+  max-width: 100%;       /* prevent overflow if the JS measurement lags the layout */
+}
+.route-summary .route-infra-segs rect {
+  shape-rendering: crispEdges;
+}
+.route-summary .route-infra-line {
+  fill: none;
+  stroke: #777;
+  stroke-width: 0.6;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+}
+.route-summary .route-infra-label {
+  font-size: 11px;
+  fill: #333;
+  font-variant-numeric: tabular-nums;
 }
 .route-tab.active {
   color: #ad1457;
@@ -519,16 +646,101 @@ body {
 }
 
 .route-summary {
-  font-size: 13px;
+  font-size: 14px;
   margin-bottom: 8px;
-  padding-bottom: 6px;
+  padding: 10px 12px;
   border-bottom: 1px solid #eee;
 }
-.route-summary b { font-size: 15px; color: #1f6b3d; }
-.route-meta { display: block; font-size: 10px; color: #888; margin-top: 2px; }
+.route-summary b { font-size: 17px; color: #1f6b3d; }
+.route-meta { display: block; font-size: 11px; color: #888; margin-top: 2px; }
+
+/* ============ Elevation profile chart ============ */
+/* Sits between the route summary and the step list. Brown palette matches
+ * the contour-line color on the map so the chart reads as "terrain."  */
+.route-elev {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+}
+/* Same 1:1 viewBox/pixel approach as .route-infra-bar — width and
+ * height are set by inline attributes on the <svg> element at render
+ * time so font-size and chart height stay constant across screen
+ * widths. */
+.route-elev-chart {
+  display: block;
+  max-width: 100%;
+}
+.route-elev-fill {
+  fill: #cdb293;
+  fill-opacity: 0.55;
+  stroke: none;
+}
+.route-elev-line {
+  fill: none;
+  stroke: #6d4c41;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+.route-elev-axis {
+  stroke: #c8b9a7;
+  stroke-width: 0.6;
+}
+.route-elev-tick {
+  font-size: 10px;
+  fill: #6d4c41;
+  font-variant-numeric: tabular-nums;
+}
+.route-elev-stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #6d4c41;
+  font-variant-numeric: tabular-nums;
+}
+.route-elev-stats b { color: #4a2f23; font-size: 13px; }
+
+/* Cursor sync: vertical line + dot + label that follow the mouse over
+ * the chart OR over the route line on the map (whichever drove the
+ * latest event). Pink to match the active route line. */
+.route-elev-chart { cursor: crosshair; }
+.route-elev-cursor-line {
+  stroke: #e91e63;
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+  pointer-events: none;
+}
+.route-elev-cursor-dot {
+  fill: #e91e63;
+  stroke: #ffffff;
+  stroke-width: 1.4;
+  pointer-events: none;
+}
+.route-elev-cursor-label {
+  font-size: 10px;
+  font-weight: 600;
+  fill: #ad1457;
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 2.5;
+  pointer-events: none;
+}
+/* Map-side hover dot, same color family. */
+.route-hover-dot {
+  width: 12px;
+  height: 12px;
+  background: #e91e63;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
 
 .route-steps {
-  margin: 0; padding: 0;
+  margin: 0; 
+  padding: 10px 12px;
   list-style: none;
   counter-reset: step;
 }
@@ -550,7 +762,7 @@ body {
   color: #ffffff;
   border: 2px solid #ffffff;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   text-align: center;
 }
@@ -565,8 +777,8 @@ body {
   cursor: default;
 }
 .route-step-instruction { font-weight: 500; color: #222; line-height: 1.3; }
-.route-step-distance { font-size: 11px; color: #888; margin-top: 2px; }
-.route-step-annotation { font-size: 11px; color: #b06000; font-style: italic; margin-top: 2px; line-height: 1.3; }
+.route-step-distance { font-size: 12px; color: #888; margin-top: 2px; }
+.route-step-annotation { font-size: 12px; color: #b06000; font-style: italic; margin-top: 2px; line-height: 1.3; }
 
 .route-alt-label {
   background: #ffffff;
@@ -575,7 +787,7 @@ body {
   border-radius: 12px;
   border: 1.5px solid #f48fb1;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.2;
   text-align: center;
   cursor: pointer;
@@ -583,4 +795,238 @@ body {
   user-select: none;
 }
 .route-alt-label:hover { background: #fce4ec; }
-.route-alt-meta { color: #888; font-size: 9px; }
+.route-alt-meta { color: #888; font-size: 11px; }
+
+/* ============ Mobile-only elements hidden on desktop ============ */
+#sheet-handle-bar { display: none; }
+
+/* ============ Choose-on-map banner (shown when picking on map) ============ */
+/* Pink rounded chip centered at the top of the viewport. */
+#choose-on-map-banner {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  background: #e91e63;
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 500;
+}
+#choose-on-map-banner[hidden] { display: none; }
+#choose-on-map-banner .cob-msg { white-space: nowrap; }
+#choose-on-map-banner #cob-cancel {
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+#choose-on-map-banner #cob-cancel:hover,
+#choose-on-map-banner #cob-cancel:active {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* ============ :active feedback (all viewports) ============ */
+/* Mirrors the existing :hover rules on press so touch users get
+ * immediate response. Sizes/paddings unchanged. */
+.addr-sugg:active,
+.addr-sugg.option-row:active { background: #fce4ec; }
+.segmented-control label:active { background: #fce4ec; }
+.segmented-control input[type="radio"]:checked + label:active { background: #c2185b; }
+.route-tab:active { background: #fce4ec; }
+.route-loc-row button:active,
+.settings-loc-row button:active { background: #f0f0f0; color: #b03030; }
+#open-settings:active,
+#layers-fab:active,
+#swap-endpoints:active { background: #ececec; color: #222; }
+.pop-go-btn:active { background: #c2185b; }
+.route-alt-label:active { background: #fce4ec; }
+
+/* ============ Mobile bottom-sheet layout (≤ 719 px) ============
+ *
+ * On small screens the page reorganizes into:
+ *   - Fixed top title bar (#app-header), pinned to viewport top.
+ *     Contains the app title, the layers icon, and the settings gear.
+ *     #app-header is a top-level DOM sibling of #sheet — critically
+ *     NOT a descendant — so the transform on #sheet doesn't act as
+ *     a containing block for it. (A `position: fixed` element inside
+ *     a transformed ancestor is positioned relative to the ancestor,
+ *     not the viewport. Putting #app-header outside #sheet is the
+ *     fix.)
+ *   - Bottom sheet (#sheet) wrapping the routing + directions panel.
+ *     2-cycle snap (peek/full) controlled by src/sheet.js. The sheet
+ *     itself has the white background + drop shadow so the drag pill
+ *     lies on top of it.
+ *   - Layers panel (#layers-panel) becomes a full-screen overlay
+ *     toggled by the layers icon — same styling as the settings
+ *     dialog (sticky header with title + close X, sections).
+ *   - Settings dialog (#settings-modal) goes full-screen.
+ *   - MapLibre's NavigationControl is hidden (pinch handles zoom).
+ */
+
+@media (max-width: 719px) {
+  /* === Top title bar — truly fixed to the viewport top. */
+  #app-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    width: auto;
+    border-radius: 0;
+    z-index: 5;
+    margin: 0;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.96);
+    border-bottom: 1px solid #eee;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  }
+  /* Layers icon is shown only on mobile — already styled like the
+   * settings gear above; just flip from display:none. */
+  #layers-fab { display: inline-flex; }
+
+  /* === Sheet === */
+  #sheet {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 100vh;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.18);
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+    transition: transform 220ms cubic-bezier(.2,.7,.2,1);
+    transform: translateY(calc(100vh - 200px));
+  }
+  #sheet.dragging { transition: none; }
+
+  /* === Drag pill — lies on top of the sheet's own white surface === */
+  #sheet-handle-bar {
+    display: block;
+    flex-shrink: 0;
+    width: 100%;
+    height: 26px;
+    position: relative;
+    cursor: grab;
+    touch-action: none;
+  }
+  #sheet-handle-bar::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 11px;
+    transform: translateX(-50%);
+    width: 40px;
+    height: 4px;
+    background: #c8c8c8;
+    border-radius: 2px;
+  }
+  #sheet-handle-bar:active { cursor: grabbing; }
+
+  /* === Inner stack: sized to the visible sheet portion (set by JS). */
+  #sheet #left-stack {
+    position: static;
+    top: auto;
+    left: auto;
+    width: auto;
+    margin: 0;
+    padding: 0;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+  }
+
+  /* Inside the sheet, the routing & directions panels lose their own
+   * pill — the sheet itself provides the white background and shadow,
+   * so the inner panels just contribute content padding. The original
+   * #app-header (which would have been at the top of #routing-panel)
+   * is the fixed top bar instead and shouldn't take space in the panel
+   * — but it's already `position: fixed` so it doesn't. */
+  #sheet #routing-panel,
+  #sheet #directions-panel {
+    background: transparent;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 0;
+  }
+  #sheet #directions-panel { padding-top: 8px; }
+
+  /* === Layers panel — full-screen overlay styled like the settings
+   * dialog. The same #layers-panel element is used; CSS reshapes it. */
+  #layers-panel {
+    position: fixed;
+    top: 0; right: 0; bottom: 0; left: 0;
+    width: auto;
+    max-height: 100vh;
+    margin: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background: #fff;
+    overflow-y: auto;
+    z-index: 6;        /* above the title bar */
+    display: none;
+    padding: 0;
+  }
+  #layers-panel.open { display: block; }
+  /* Mobile-only header with title + close X (mirrors #settings-modal). */
+  #layers-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #eee;
+    position: sticky;
+    top: 0;
+    background: #fff;
+    z-index: 1;
+  }
+  #layers-panel-header h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+  }
+
+  /* Hide MapLibre's NavigationControl on mobile — the layers icon in
+   * the title bar owns the top-right corner; pinch + drag are native. */
+  .maplibregl-ctrl-top-right .maplibregl-ctrl { display: none; }
+
+  /* === Settings dialog — full-screen on mobile === */
+  dialog#settings-modal {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    border-radius: 0;
+    margin: 0;
+    z-index: 6;
+  }
+  dialog#settings-modal header {
+    position: sticky;
+    top: 0;
+    background: #fff;
+    z-index: 1;
+  }
+
+  /* Popups above the sheet; banner below the title bar. */
+  .maplibregl-popup { z-index: 5; }
+  #choose-on-map-banner {
+    top: 56px;          /* below the title bar */
+    z-index: 5;
+  }
+}
