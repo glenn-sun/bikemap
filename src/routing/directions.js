@@ -109,26 +109,59 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
     let distanceFt = 0;
     let hasOnewayLane = false;
     let allRoadOneway = true;
+    let anySidewalk = false;
+    let allSidewalk = true;
     for (let i = segStart; i <= segEnd; i++) {
       const eid = pathEdgeIds[i];
       distanceFt += graph.edgeLengthFt(eid);
       if (graph.edgeModelType(eid) === 'BKF-ONEWAY') hasOnewayLane = true;
       if (!graph.edgeOneway(eid)) allRoadOneway = false;
+      if (graph.edgeIsSidewalk(eid)) anySidewalk = true;
+      else allSidewalk = false;
     }
+
+    // For sidewalk segments, work out which side of the parallel road
+    // the cyclist is on ("right sidewalk of <Street>" reads from the
+    // perspective of someone driving in the cyclist's direction). The
+    // side is computed from the first sidewalk edge's bearing + the
+    // build-time perpendicular offset bearing to the matched road.
+    let sidewalkSide = null;
+    if (allSidewalk) {
+      for (let i = segStart; i <= segEnd; i++) {
+        const eid = pathEdgeIds[i];
+        const ob = graph.edgeSidewalkBearing(eid);
+        if (ob == null) continue;
+        sidewalkSide = sidewalkSideFromBearings(graph.edgeBearingStart(eid), ob);
+        if (sidewalkSide) break;
+      }
+    }
+    const sidewalkPhrase = allSidewalk
+      ? (name ? `the ${sidewalkSide ? sidewalkSide + ' ' : ''}sidewalk of ${abbreviateDirectionalsStr(name)}`
+              : `the ${sidewalkSide ? sidewalkSide + ' ' : ''}sidewalk`)
+      : null;
 
     let instruction;
     if (segStart === 0) {
-      instruction = `Head ${cardinalFromBearing(graph.edgeBearingStart(startEdge))}`
-                  + (name ? ` on ${abbreviateDirectionalsStr(name)}` : '');
+      const heading = cardinalFromBearing(graph.edgeBearingStart(startEdge));
+      if (sidewalkPhrase) {
+        instruction = `Head ${heading} on ${sidewalkPhrase}`;
+      } else {
+        instruction = `Head ${heading}`
+                    + (name ? ` on ${abbreviateDirectionalsStr(name)}` : '');
+      }
     } else {
       // Turn classification based on bearing change at the join.
       const prevEdge = pathEdgeIds[segStart - 1];
       const turn = classifyTurn(graph.edgeBearingEnd(prevEdge),
                                 graph.edgeBearingStart(startEdge),
                                 graph.nodeFlags(graph.edgeTo(prevEdge)));
-      instruction = name
-        ? `${turn} onto ${abbreviateDirectionalsStr(name)}`
-        : `${turn}`;
+      if (sidewalkPhrase) {
+        instruction = `${turn} onto ${sidewalkPhrase}`;
+      } else {
+        instruction = name
+          ? `${turn} onto ${abbreviateDirectionalsStr(name)}`
+          : `${turn}`;
+      }
     }
 
     const annotations = [];
@@ -137,6 +170,13 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
     // one-way, the bike lane direction equals the travel direction.
     if (hasOnewayLane && !allRoadOneway) {
       annotations.push('One-way bike lane may or may not be in direction of travel');
+    }
+    // Sidewalk reminder: legal context (e-bikes/scooters forbidden) is
+    // surfaced via the toggle's tooltip; here we just confirm the step
+    // is on a sidewalk, since the directions otherwise look the same as
+    // an on-street step.
+    if (anySidewalk && !allSidewalk) {
+      annotations.push('Includes a short sidewalk segment');
     }
 
     // Skip a bare "Continue" with no street name — it carries no info
@@ -214,6 +254,22 @@ function classifyTurn(prevBearing, nextBearing, nodeFlags) {
     if (abs >= 60)        return 'Turn right';
     return 'Slight right';
   }
+}
+
+/** Given the cyclist's heading and the perpendicular bearing FROM the
+ *  parallel road TO the sidewalk midpoint, return "left" or "right" for
+ *  the cyclist's perspective. Convention: "right sidewalk of X" means
+ *  the sidewalk on the right side of X relative to the cyclist's
+ *  direction of travel, i.e. the cyclist is walking on it with the road
+ *  on their left. Returns null if the geometry is ambiguous (offset
+ *  parallel rather than perpendicular). */
+function sidewalkSideFromBearings(cyclistHeading, offsetBearing) {
+  const rel = ((offsetBearing - cyclistHeading) % 360 + 360) % 360;
+  // 5° dead-band around 0 and 180 — if the sidewalk's offset is
+  // essentially parallel to the cyclist's heading the side designation
+  // is meaningless.
+  if (rel < 5 || rel > 355 || (rel > 175 && rel < 185)) return null;
+  return rel < 180 ? 'right' : 'left';
 }
 
 function cardinalFromBearing(b) {

@@ -55,6 +55,7 @@ const LS_PRESET = 'bikemap-routing-preset';
 const LS_CUSTOM = 'bikemap-routing-custom';
 const LS_CUSTOM_ENABLED = 'bikemap-routing-custom-enabled';
 const LS_DEBUG_ENABLED = 'bikemap-routing-debug-enabled';
+const LS_SIDEWALKS_ENABLED = 'bikemap-routing-sidewalks-enabled';
 const LS_HOME   = 'bikemap-saved-home';
 const LS_WORK   = 'bikemap-saved-work';
 const LS_SPEED  = 'bikemap-cycling-speed-mph';
@@ -102,6 +103,7 @@ export function initRoutingUI(map, vm = null) {
     customSliders: loadCustomFromStorage(),
     customEnabled: loadCustomEnabledFromStorage(),
     debugEnabled: loadDebugEnabledFromStorage(),
+    sidewalksEnabled: loadSidewalksEnabledFromStorage(),
     home: loadLocFromStorage(LS_HOME),
     work: loadLocFromStorage(LS_WORK),
     speedMph: loadSpeedFromStorage(),
@@ -109,7 +111,8 @@ export function initRoutingUI(map, vm = null) {
                          // as the pink primary line / step list
     userLocation: null,  // {lon, lat, accuracy} — null until first GPS fix
     userLocationMarker: null,
-    geoWatchId: null,
+    geoWatchIdHigh: null,
+    geoWatchIdLow: null,
     // Two-way hover sync between elevation chart and the active route
     // line on the map. `hoverSeries` is the current active route's
     // elevation series (distances/elevations/coords); `hoverMarker` is a
@@ -132,6 +135,7 @@ export function initRoutingUI(map, vm = null) {
   wireSettingsModal(state);
   wirePresetUI(state);
   setPresetUI(state);
+  wireSidewalksToggle(state);
   wireGlobalChooseInteractions(state);
   startUserLocationTracking(state);
   attachMapHoverHandlers(state);
@@ -344,15 +348,25 @@ function setEndpoint(state, which, spec, lon, lat, label) {
 // ---------- compute primary + twists ----------
 
 function activeWeights(state) {
-  if (state.preset === 'custom') return weightsForCustom(state.customSliders);
-  return weightsForPreset(state.preset);
+  const sw = state.sidewalksEnabled;
+  if (state.preset === 'custom') return weightsForCustom(state.customSliders, sw);
+  return weightsForPreset(state.preset, sw);
 }
 function activeSliders(state) {
   return state.preset === 'custom' ? state.customSliders : PRESETS[state.preset];
 }
 
 function compute(state) {
-  setPanel(state, '<p class="route-loading">Computing route…</p>');
+  // Loading state: vertically-centered "Computing route" with animated
+  // ellipsis. Three separately-fading dots in spans (CSS animates each
+  // span's opacity at staggered delays).
+  setPanel(state,
+    '<div class="route-loading">'
+    + '<span class="route-loading-text">Computing route</span>'
+    + '<span class="route-loading-dots">'
+    + '<span>.</span><span>.</span><span>.</span>'
+    + '</span>'
+    + '</div>');
   setTimeout(() => {
     const t0 = performance.now();
     const primaryWeights = activeWeights(state);
@@ -362,6 +376,7 @@ function compute(state) {
       weights: weightsFromSliders(
         applyTwistToSliders(baseSliders, t.id),
         primaryWeights.signCoverageMax,
+        state.sidewalksEnabled,
       ),
     }));
     const routes = findPathsMulti(primaryWeights, state.graph,
@@ -372,19 +387,28 @@ function compute(state) {
       setPanel(state, '<p class="route-error">No path found between those points.</p>');
       state.routes = [];
       drawRoutes(state);
-      return;
+    } else {
+      // Annotate each route with its geometry index set (used for
+      // max-difference label placement on alts) and its stitched polyline.
+      state.routes = routes.map((r) => ({
+        ...r,
+        fullGeom: stitchGeometry(state.graph, r.result),
+        geomSet: geomIndexSet(state.graph, r.result.pathEdgeIds),
+      }));
+      state.activeIndex = 0;    // primary is active by default; tabs stay stable
+      state.lastComputeMs = tMs;
+      drawRoutes(state);
+      renderPrimary(state);
     }
-    // Annotate each route with its geometry index set (used for
-    // max-difference label placement on alts) and its stitched polyline.
-    state.routes = routes.map((r) => ({
-      ...r,
-      fullGeom: stitchGeometry(state.graph, r.result),
-      geomSet: geomIndexSet(state.graph, r.result.pathEdgeIds),
-    }));
-    state.activeIndex = 0;    // primary is active by default; tabs stay stable
-    state.lastComputeMs = tMs;
-    drawRoutes(state);
-    renderPrimary(state);
+    // On mobile, expand the sheet to "full" whenever compute finishes —
+    // so the user can see directions immediately after typing/selecting
+    // endpoints OR after a Choose-on-map flow (which had collapsed
+    // the sheet to peek so the user could see the map). Fired even on
+    // route-not-found so the error message is also visible. The double
+    // call (now + rAF) survives a stray keyboard-dismiss resize that
+    // could otherwise re-apply a stale snap state.
+    snapSheet('full');
+    requestAnimationFrame(() => snapSheet('full'));
   }, 0);
 }
 
@@ -680,10 +704,15 @@ function infraBreakdown(graph, edgeIds) {
   //                    bar can render their three colors in proportion
   //   - Local streets: no facility AND no centerline (≈ residential)
   //   - Major streets: no facility AND has centerline (arterial/collector)
-  let aaa = 0, bbl = 0, bl = 0, shw = 0, local = 0, major = 0, total = 0;
+  //   - Sidewalk     : OSM footway=sidewalk|crossing (gray)
+  let aaa = 0, bbl = 0, bl = 0, shw = 0, local = 0, major = 0, sidewalk = 0, total = 0;
   for (const eid of edgeIds) {
     const len = graph.edgeLengthFt(eid);
     total += len;
+    // Sidewalks short-circuit ahead of facility classification (a
+    // sidewalk should never inherit AAA paint anyway, but we re-assert
+    // it here so the bar is consistent with the routing logic).
+    if (graph.edgeIsSidewalk(eid)) { sidewalk += len; continue; }
     const fac = graph.edgeFacility(eid);
     if (fac === 'BKF-NGW' || fac === 'BKF-PBL' || fac === 'BKF-OFFST') aaa += len;
     else if (fac === 'BKF-BBL') bbl += len;
@@ -692,7 +721,7 @@ function infraBreakdown(graph, edgeIds) {
     else if (!graph.edgeCenterline(eid)) local += len;
     else major += len;
   }
-  return { aaa, bbl, bl, shw, local, major, total };
+  return { aaa, bbl, bl, shw, local, major, sidewalk, total };
 }
 
 // Sub-segment fill colors — MUST stay in sync with the per-tier line
@@ -700,28 +729,42 @@ function infraBreakdown(graph, edgeIds) {
 // "Local streets" is white (rendered with a thin gray stroke so it's
 // visible against the white panel); "Major streets" is a muted red.
 const INFRA_COLORS = {
-  aaa:   '#1F6B3D',
-  bbl:   '#3FA85F',
-  bl:    '#7FCC9C',
-  shw:   '#E07A1F',
-  local: '#ffffff',
-  major: '#d65a5a',
+  aaa:      '#1F6B3D',
+  bbl:      '#3FA85F',
+  bl:       '#7FCC9C',
+  shw:      '#E07A1F',
+  local:    '#ffffff',
+  major:    '#d65a5a',
+  sidewalk: '#9e9e9e',
 };
 
 const INFRA_GROUP_META = {
-  aaa:   { label: 'All ages & abilities', pos: 'top' },
-  other: { label: 'Other bike',           pos: 'bot' },
-  local: { label: 'Local streets',        pos: 'top' },
-  major: { label: 'Major streets',        pos: 'bot' },
+  aaa:      { label: 'All ages & abilities', pos: 'top' },
+  other:    { label: 'Other bike',           pos: 'bot' },
+  local:    { label: 'Local streets',        pos: 'top' },
+  major:    { label: 'Major streets',        pos: 'bot' },
+  sidewalk: { label: 'Sidewalk',             pos: 'bot' },
 };
 
 function infraSummaryBarSvg(b, vbWidth = 320) {
   // Render the breakdown as a horizontal bar:
-  //   [AAA | BBL | BL | SHW | LOCAL | MAJOR]
-  // Two labels above (AAA, Local) and two below (Other bike, Major), each
-  // with an L-line pointing to its segment. "Other bike" gets a T-shape
-  // bracket spanning all of BBL+BL+SHW when more than one sub-color is
-  // present, so the colors visibly belong together.
+  //   [AAA | BBL | BL | SHW | LOCAL | MAJOR | SIDEWALK]
+  // Each category gets a label connected to its bar segment by an L-line.
+  // Labels sit above the bar (`pos: 'top'`) or below (`pos: 'bot'`).
+  //
+  // Layout strategy (single row per side):
+  //   1. Label x-placement: each label starts at its bar-segment center.
+  //      Then we run a symmetric repulsion relaxation — for each pair
+  //      with overlapping x-extents we push both members apart by half
+  //      of the overlap, then clamp to the viewBox. Iterate until
+  //      stable. This distributes displacement across both sides of an
+  //      overlap rather than letting one label accumulate the full push.
+  //   2. Connector defaults: each connector has the original midY
+  //      (midpoint between the bar edge and the label-glyph edge).
+  //   3. Connector overlap resolution: if two connectors on the same
+  //      side end up with horizontal mid-segments at the same y and
+  //      x-overlapping, we nudge one a few px toward the label and the
+  //      other a few px toward the bar. Iterate until separated.
   //
   // `vbWidth` is the SVG's RENDERED PIXEL WIDTH and is also used as the
   // viewBox width, so 1 viewBox unit = 1 screen pixel. Result: font
@@ -735,12 +778,13 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
 
   // Walk the sub-segments left-to-right and assign x ranges.
   const subs = [
-    { k: 'aaa',   ft: b.aaa,   group: 'aaa'   },
-    { k: 'bbl',   ft: b.bbl,   group: 'other' },
-    { k: 'bl',    ft: b.bl,    group: 'other' },
-    { k: 'shw',   ft: b.shw,   group: 'other' },
-    { k: 'local', ft: b.local, group: 'local' },
-    { k: 'major', ft: b.major, group: 'major' },
+    { k: 'aaa',      ft: b.aaa,            group: 'aaa'      },
+    { k: 'bbl',      ft: b.bbl,            group: 'other'    },
+    { k: 'bl',       ft: b.bl,             group: 'other'    },
+    { k: 'shw',      ft: b.shw,            group: 'other'    },
+    { k: 'local',    ft: b.local,          group: 'local'    },
+    { k: 'major',    ft: b.major,          group: 'major'    },
+    { k: 'sidewalk', ft: b.sidewalk || 0,  group: 'sidewalk' },
   ];
   let cursor = BAR_X0;
   for (const s of subs) {
@@ -759,57 +803,63 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
     const x1 = Math.max(...ss.map((s) => s.x1));
     const ft = ss.reduce((acc, s) => acc + s.ft, 0);
     const pct = Math.round(100 * ft / b.total);
+    // Sub-1% categories show as "<1%" rather than rounded to 0% — a
+    // sliver that contributes any nonzero distance is still on the
+    // route, and the user should see it called out as such.
+    const pctText = pct === 0 ? '<1%' : `${pct}%`;
     groups.push({
       g, x0, x1, center: (x0 + x1) / 2,
       multi: ss.length > 1,
       pct,
-      label: `${INFRA_GROUP_META[g].label} · ${pct}%`,
+      label: `${INFRA_GROUP_META[g].label} · ${pctText}`,
       pos: INFRA_GROUP_META[g].pos,
     });
   }
 
-  // Collapse the unused side's zone when only one side has labels.
-  //   Full layout (both sides):  [top zone 32 | bar 14 | bot zone 36] = 82
-  //   Only top labels (e.g. all-AAA): drop the 36 px bottom zone → 50 px tall.
-  //   Only bot labels (e.g. all-major): drop the 32 px top zone → 54 px tall.
-  // SVG aspect ratio changes, so the rendered height shrinks with the
-  // collapsed viewBox (width stays 100 %).
+  // Label width estimate (9.5px sans ≈ 5.3 px/char) for collision tests.
+  for (const grp of groups) {
+    const estW = grp.label.length * 5.3 + 4;
+    grp.halfW = estW / 2;
+  }
+
+  // Geometry: single row per side at the ORIGINAL y positions.
   const hasTop = groups.some((g) => g.pos === 'top');
   const hasBot = groups.some((g) => g.pos === 'bot');
-  const TOP_ZONE = hasTop ? 32 : 4;       // 4 px tiny pad when no top labels
+  const TOP_ZONE = hasTop ? 32 : 4;
   const BOT_ZONE = hasBot ? 36 : 4;
   const BAR_H = 14;
   const BAR_Y0 = TOP_ZONE;
   const BAR_Y1 = BAR_Y0 + BAR_H;
   const VB_H = TOP_ZONE + BAR_H + BOT_ZONE;
-  const TOP_BASELINE = 12;                // label baseline inside top zone
-  const BOT_BASELINE = BAR_Y1 + 28;       // label baseline inside bot zone
+  const TOP_BASELINE = 12;
+  const BOT_BASELINE = BAR_Y1 + 28;
 
-  // Estimate label widths from char count (9.5px sans ≈ 5.3 px/char) so
-  // we can clamp them inside the viewBox. Then push same-side labels
-  // apart when they'd overlap. Two labels per side max, so a single
-  // greedy left-to-right pass is sufficient.
-  for (const grp of groups) {
-    const estW = grp.label.length * 5.3 + 4;
-    grp.halfW = estW / 2;
-    grp.labelX = Math.max(grp.halfW, Math.min(VB_W - grp.halfW, grp.center));
-  }
-  for (const side of ['top', 'bot']) {
-    const gs = groups.filter((g) => g.pos === side)
-                     .sort((a, b) => a.labelX - b.labelX);
-    for (let i = 1; i < gs.length; i++) {
-      const prev = gs[i - 1], cur = gs[i];
-      const minGap = prev.halfW + cur.halfW + 4;
-      if (cur.labelX - prev.labelX < minGap) {
-        cur.labelX = prev.labelX + minGap;
-        const maxRight = VB_W - cur.halfW;
-        if (cur.labelX > maxRight) {
-          cur.labelX  = maxRight;
-          prev.labelX = Math.max(prev.halfW, cur.labelX - minGap);
+  // Symmetric repulsion: push half of each overlap onto each member,
+  // clamp to viewBox edges, iterate until stable (or capped). Works
+  // for any label widths and any number of labels per side.
+  function placeLabels(side) {
+    const ls = groups.filter((g) => g.pos === side).sort((a, b) => a.center - b.center);
+    for (const l of ls) l.labelX = l.center;
+    const minGap = (a, b) => a.halfW + b.halfW + 6;
+    const clamp = (l) => { l.labelX = Math.max(l.halfW, Math.min(VB_W - l.halfW, l.labelX)); };
+    for (let iter = 0; iter < 40; iter++) {
+      let maxOverlap = 0;
+      for (let i = 1; i < ls.length; i++) {
+        const a = ls[i - 1], c = ls[i];
+        const overlap = minGap(a, c) - (c.labelX - a.labelX);
+        if (overlap > 0) {
+          a.labelX -= overlap / 2;
+          c.labelX += overlap / 2;
+          if (overlap > maxOverlap) maxOverlap = overlap;
         }
       }
+      for (const l of ls) clamp(l);
+      if (maxOverlap < 0.5) break;
     }
+    return ls;
   }
+  const topLabels = placeLabels('top');
+  const botLabels = placeLabels('bot');
 
   // Sub-segment rects.
   const segRects = subs.filter((s) => s.w > 0).map((s) => {
@@ -821,31 +871,174 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
          + `fill="${INFRA_COLORS[s.k]}"${stroke}/>`;
   }).join('');
 
-  // Connector lines + label text.
-  const parts = [];
-  for (const grp of groups) {
+  // Build connector data per label. Each connector has a horizontal
+  // mid-segment running between segCenter and labelX at y = midY. The
+  // midY is constrained to [yMin, yMax]; we start at the default
+  // midpoint and nudge in resolveConnectorOverlaps if needed.
+  function buildConn(grp) {
     const cx = grp.center, lx = grp.labelX;
     if (grp.pos === 'top') {
-      const ly = TOP_BASELINE + 3;            // just below label baseline
+      const ly = TOP_BASELINE + 3;            // just below the label glyph
+      const yMin = BAR_Y0 + 2;                // just below bar top
+      const yMax = ly - 1;                    // just above label edge
       const midY = (ly + BAR_Y0) / 2;
-      parts.push(`<polyline points="${lx.toFixed(2)},${ly} ${lx.toFixed(2)},${midY} ${cx.toFixed(2)},${midY} ${cx.toFixed(2)},${BAR_Y0}" class="route-infra-line"/>`);
-    } else {
-      const ly = BOT_BASELINE - 11;           // just above label top
-      if (grp.g === 'other' && grp.multi) {
-        // T-bracket: a horizontal flat side just below the bar, spanning
-        // the whole "other" range, then a stem (L-bent if shifted) down
-        // to the label.
-        const bracketY = BAR_Y1 + 3;
-        const stemMidY = (bracketY + ly) / 2;
-        parts.push(`<polyline points="${grp.x0.toFixed(2)},${bracketY} ${grp.x1.toFixed(2)},${bracketY}" class="route-infra-line"/>`);
-        parts.push(`<polyline points="${cx.toFixed(2)},${bracketY} ${cx.toFixed(2)},${stemMidY} ${lx.toFixed(2)},${stemMidY} ${lx.toFixed(2)},${ly}" class="route-infra-line"/>`);
-      } else {
-        const midY = (BAR_Y1 + ly) / 2;
-        parts.push(`<polyline points="${cx.toFixed(2)},${BAR_Y1} ${cx.toFixed(2)},${midY} ${lx.toFixed(2)},${midY} ${lx.toFixed(2)},${ly}" class="route-infra-line"/>`);
+      return { grp, ly, anchorY: BAR_Y0, midY, yMin, yMax,
+               xMin: Math.min(cx, lx), xMax: Math.max(cx, lx) };
+    }
+    const ly = BOT_BASELINE - 11;             // just above the label top
+    const yMin = BAR_Y1 + 2;
+    const yMax = ly - 1;
+    const useBracket = (grp.g === 'other' && grp.multi);
+    // The "other" T-bracket sits closer to the bar by default; the
+    // others sit at the midpoint between bar and label.
+    const midY = useBracket ? (BAR_Y1 + 3) : (BAR_Y1 + ly) / 2;
+    return { grp, ly, anchorY: BAR_Y1, midY, yMin, yMax,
+             // Horizontal extent: full BBL+BL+SHW span for the bracket,
+             // segCenter→labelX for the simple connectors.
+             xMin: useBracket ? grp.x0 : Math.min(cx, lx),
+             xMax: useBracket ? grp.x1 : Math.max(cx, lx),
+             useBracket };
+  }
+  const topConns = topLabels.map(buildConn);
+  const botConns = botLabels.map(buildConn);
+
+  // Build the geometry of each connector as a list of line segments
+  // (used for crossing detection). The L-shape connector emits
+  //   - 1 horizontal at y=midY, x in [min(cx,lx), max(cx,lx)]
+  //   - 2 verticals (cx leg between bar anchor and midY; lx leg
+  //                  between midY and label edge)
+  // The T-bracket "Other bike" multi connector emits
+  //   - 2 horizontals (the bracket at midY across the full BBL+BL+SHW
+  //                    span, plus the stem horizontal between cx and lx)
+  //   - 2 verticals (cx leg between midY and stemMidY; lx leg between
+  //                  stemMidY and label edge)
+  // Note brackets have no leg up to the bar — they hang in the air
+  // visually just below the bar.
+  function buildSegments(c) {
+    const cx = c.grp.center, lx = c.grp.labelX;
+    if (c.useBracket) {
+      const stemMid = (c.midY + c.ly) / 2;
+      return {
+        horiz: [
+          { y: c.midY,  xMin: c.grp.x0, xMax: c.grp.x1 },                     // bracket
+          { y: stemMid, xMin: Math.min(cx, lx), xMax: Math.max(cx, lx) },     // stem horiz
+        ],
+        verts: [
+          { x: cx, yMin: Math.min(c.midY, stemMid), yMax: Math.max(c.midY, stemMid) },
+          { x: lx, yMin: Math.min(stemMid, c.ly),   yMax: Math.max(stemMid, c.ly) },
+        ],
+      };
+    }
+    return {
+      horiz: [
+        { y: c.midY, xMin: Math.min(cx, lx), xMax: Math.max(cx, lx) },
+      ],
+      verts: [
+        { x: cx, yMin: Math.min(c.anchorY, c.midY), yMax: Math.max(c.anchorY, c.midY) },
+        { x: lx, yMin: Math.min(c.midY, c.ly),     yMax: Math.max(c.midY, c.ly) },
+      ],
+    };
+  }
+
+  // Count visible crossings between two connectors. Counts every
+  // vertical-leg × horizontal-segment intersection plus any same-y
+  // horizontal-horizontal overlap.
+  function pairCrossings(c1, c2) {
+    const a = buildSegments(c1);
+    const b = buildSegments(c2);
+    let n = 0;
+    const hvCross = (h, v) =>
+      v.x >= h.xMin && v.x <= h.xMax && h.y >= v.yMin && h.y <= v.yMax;
+    for (const h of a.horiz) for (const v of b.verts) if (hvCross(h, v)) n++;
+    for (const h of b.horiz) for (const v of a.verts) if (hvCross(h, v)) n++;
+    for (const h1 of a.horiz) for (const h2 of b.horiz) {
+      if (Math.abs(h1.y - h2.y) < 0.5
+          && !(h1.xMax < h2.xMin || h2.xMax < h1.xMin)) n++;
+    }
+    return n;
+  }
+  function totalCrossings(conns) {
+    let n = 0;
+    for (let i = 0; i < conns.length; i++) {
+      for (let j = i + 1; j < conns.length; j++) n += pairCrossings(conns[i], conns[j]);
+    }
+    return n;
+  }
+
+  // Exhaustively search discrete midY assignments for the combination
+  // with the fewest crossings. With at most ~5 connectors per side
+  // (aaa/local on top; other/major/sidewalk on bot) and 5 candidate
+  // levels per connector, that's ≤ 5^5 = 3,125 evaluations — trivial.
+  // Each connector's allowed range is [yMin, yMax]; we sample 5 evenly
+  // spaced levels including the default midpoint.
+  //
+  // Tiebreak: prefer assignments with less total perturbation from the
+  // default midY (avoids gratuitous movement when crossings are tied).
+  // This is the core fix for the "all heights differ but two
+  // connectors still cross" case — a swap of two midYs often clears
+  // the crossing, and exhaustive search picks it up.
+  function optimizeMidYs(conns) {
+    if (conns.length <= 1) return;
+    const N_LEVELS = 5;
+    // Stash defaults for the perturbation tiebreaker.
+    for (const c of conns) c._defaultMidY = c.midY;
+    const levelsPer = conns.map((c) => {
+      const out = [];
+      const span = c.yMax - c.yMin;
+      for (let i = 0; i < N_LEVELS; i++) {
+        out.push(c.yMin + (span * i) / (N_LEVELS - 1));
+      }
+      return out;
+    });
+
+    const N = conns.length;
+    const total = N_LEVELS ** N;
+    let bestScore = Infinity;
+    const bestIdx = new Array(N).fill(0);
+    const cur = new Array(N).fill(0);
+    for (let combo = 0; combo < total; combo++) {
+      let t = combo;
+      for (let i = 0; i < N; i++) { cur[i] = t % N_LEVELS; t = Math.floor(t / N_LEVELS); }
+      for (let i = 0; i < N; i++) conns[i].midY = levelsPer[i][cur[i]];
+      const crossings = totalCrossings(conns);
+      let perturbation = 0;
+      for (let i = 0; i < N; i++) perturbation += Math.abs(conns[i].midY - conns[i]._defaultMidY);
+      const score = crossings * 1e6 + perturbation;
+      if (score < bestScore) {
+        bestScore = score;
+        for (let i = 0; i < N; i++) bestIdx[i] = cur[i];
       }
     }
-    const baseY = grp.pos === 'top' ? TOP_BASELINE : BOT_BASELINE;
-    parts.push(`<text x="${lx.toFixed(2)}" y="${baseY}" class="route-infra-label" text-anchor="middle">${escHtml(grp.label)}</text>`);
+    for (let i = 0; i < N; i++) conns[i].midY = levelsPer[i][bestIdx[i]];
+  }
+  optimizeMidYs(topConns);
+  optimizeMidYs(botConns);
+
+  // Connector lines + label text.
+  const parts = [];
+  const allConns = [...topConns, ...botConns];
+  for (const c of allConns) {
+    const grp = c.grp;
+    const cx = grp.center, lx = grp.labelX;
+    const midY = c.midY;
+    if (grp.pos === 'top') {
+      const ly = c.ly;
+      parts.push(`<polyline points="${lx.toFixed(2)},${ly} ${lx.toFixed(2)},${midY.toFixed(2)} ${cx.toFixed(2)},${midY.toFixed(2)} ${cx.toFixed(2)},${BAR_Y0}" class="route-infra-line"/>`);
+      parts.push(`<text x="${lx.toFixed(2)}" y="${TOP_BASELINE}" class="route-infra-label" text-anchor="middle">${escHtml(grp.label)}</text>`);
+    } else {
+      const ly = c.ly;
+      if (c.useBracket) {
+        // T-bracket spans the BBL+BL+SHW range at `midY`; the stem
+        // drops to a halfway point and then to the label x.
+        const bracketY = midY;
+        const stemMidY = (bracketY + ly) / 2;
+        parts.push(`<polyline points="${grp.x0.toFixed(2)},${bracketY.toFixed(2)} ${grp.x1.toFixed(2)},${bracketY.toFixed(2)}" class="route-infra-line"/>`);
+        parts.push(`<polyline points="${cx.toFixed(2)},${bracketY.toFixed(2)} ${cx.toFixed(2)},${stemMidY.toFixed(2)} ${lx.toFixed(2)},${stemMidY.toFixed(2)} ${lx.toFixed(2)},${ly}" class="route-infra-line"/>`);
+      } else {
+        parts.push(`<polyline points="${cx.toFixed(2)},${BAR_Y1} ${cx.toFixed(2)},${midY.toFixed(2)} ${lx.toFixed(2)},${midY.toFixed(2)} ${lx.toFixed(2)},${ly}" class="route-infra-line"/>`);
+      }
+      parts.push(`<text x="${lx.toFixed(2)}" y="${BOT_BASELINE}" class="route-infra-label" text-anchor="middle">${escHtml(grp.label)}</text>`);
+    }
   }
 
   // Explicit width/height attrs (in pixels) — the SVG renders 1:1 with
@@ -925,7 +1118,7 @@ function renderDirections(state, info) {
   if (state.routes.length > 1) {
     tabsHtml = `<ul class="route-tabs">${state.routes.map((r, i) => {
       const mi  = r.result.totalLengthFt / 5280;
-      const min = predictedMinutes(mi, state.speedMph);
+      const min = predictedMinutes(state, r);
       return `
       <li class="route-tab ${i === state.activeIndex ? 'active' : ''}" data-route-id="${escHtml(r.id)}">
         <div class="route-tab-name">${escHtml(r.label)}</div>
@@ -934,12 +1127,12 @@ function renderDirections(state, info) {
     }).join('')}</ul>`;
   }
   const miles = info.totalLengthFt / 5280;
-  const mins = predictedMinutes(miles, state.speedMph);
   // Infrastructure bar for the ACTIVE route, always shown under the
   // min/mi line in the summary block. (Lives outside the tab strip so it
   // doesn't bloat every tab and stays tied to the route that's actually
   // rendered as primary.)
   const activeRoute = state.routes[state.activeIndex];
+  const mins = predictedMinutes(state, activeRoute);
   // Both summary SVGs render at the directions panel's actual inner
   // width, with viewBox-W = pixel-W (1:1), so their font-size and
   // height stay constant across phone/desktop. See infraSummaryBarSvg
@@ -1138,15 +1331,31 @@ function swapEndpoints(state) {
 
 function startUserLocationTracking(state) {
   if (!('geolocation' in navigator)) return;
-  try {
-    state.geoWatchId = navigator.geolocation.watchPosition(
-      (pos) => updateUserLocation(state, pos),
-      (err) => console.warn('[geolocation] watch error:', err.message),
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 },
-    );
-  } catch (e) {
-    console.warn('[geolocation] watchPosition threw:', e);
-  }
+  // Run two watchers in parallel: a high-accuracy one (GPS, when
+  // available) and a low-accuracy fallback (WiFi/IP). The low-accuracy
+  // watcher catches the indoor case where the GPS-only watcher
+  // silently fails to ever fire a success. Whichever fires first
+  // populates `state.userLocation`; subsequent updates overwrite it,
+  // and the GPS one (when working) is more accurate, so it wins as
+  // soon as it lands.
+  const startWatcher = (opts, label) => {
+    try {
+      return navigator.geolocation.watchPosition(
+        (pos) => updateUserLocation(state, pos),
+        (err) => console.warn(`[geolocation] ${label} watch error:`, err.message),
+        opts,
+      );
+    } catch (e) {
+      console.warn(`[geolocation] ${label} watchPosition threw:`, e);
+      return null;
+    }
+  };
+  state.geoWatchIdHigh = startWatcher(
+    { enableHighAccuracy: true,  maximumAge: 5000,  timeout: 20000 },
+    'high-accuracy');
+  state.geoWatchIdLow  = startWatcher(
+    { enableHighAccuracy: false, maximumAge: 30000, timeout: 30000 },
+    'low-accuracy');
 }
 
 function updateUserLocation(state, pos) {
@@ -1166,13 +1375,42 @@ function updateUserLocation(state, pos) {
 // One-shot location request used when the user picks "My location" or
 // the popup Go button before the watcher has produced a fix. Resolves to
 // the new userLocation or null on failure / denial.
+//
+// Robustness layers (most failures hit one of these):
+//   1. If the background `watchPosition` watcher already has a recent
+//      fix on `state.userLocation`, use it immediately — no new
+//      browser call needed.
+//   2. Try high-accuracy GPS with a short timeout.
+//   3. On failure (most often: indoors, no GPS hardware, GPS cold-
+//      start), fall back to low-accuracy positioning which uses WiFi
+//      / IP-based location. This is what fixes the sporadic "permission
+//      is on but location fails" case — the high-accuracy provider
+//      times out while the low-accuracy one succeeds.
 function requestLocationOnce(state) {
   return new Promise((resolve) => {
     if (!('geolocation' in navigator)) { resolve(null); return; }
+    if (state.userLocation) {
+      resolve(state.userLocation);
+      return;
+    }
+    const onSuccess = (pos) => {
+      updateUserLocation(state, pos);
+      resolve(state.userLocation);
+    };
     navigator.geolocation.getCurrentPosition(
-      (pos) => { updateUserLocation(state, pos); resolve(state.userLocation); },
-      () => resolve(null),
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 },
+      onSuccess,
+      (err) => {
+        console.warn('[geolocation] high-accuracy failed, falling back to low:', err.message);
+        navigator.geolocation.getCurrentPosition(
+          onSuccess,
+          (err2) => {
+            console.warn('[geolocation] low-accuracy also failed:', err2.message);
+            resolve(null);
+          },
+          { enableHighAccuracy: false, maximumAge: 60000, timeout: 10000 },
+        );
+      },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 8000 },
     );
   });
 }
@@ -1198,9 +1436,58 @@ function pickMyLocation(state, which) {
   });
 }
 
-function predictedMinutes(miles, mph) {
-  const m = Math.round(miles / Math.max(0.1, mph) * 60);
-  return Math.max(1, m);
+// Time estimate (minutes) for a computed route. Routing is unaffected —
+// these adjustments are display-only.
+//
+// Components:
+//   - Base riding time at the user's stated speed for non-sidewalk
+//     distance, plus a 5 mph cap on any sidewalk distance regardless
+//     of the user's speed.
+//   - +2 s per ft of total climb, −0.5 s per ft of total descent (no
+//     grade-dependent term — just total ascent/descent).
+//   - +10 s per traffic signal at an interior node of the path.
+//   - +2 s per stop sign at an interior node facing the cyclist's
+//     direction of travel (the end-bearing of the incoming edge).
+function predictedMinutes(state, route) {
+  const sec = predictedSeconds(state, route);
+  return Math.max(1, Math.round(sec / 60));
+}
+
+function predictedSeconds(state, route) {
+  const graph = state.graph;
+  const r = route?.result;
+  if (!graph || !r) return 0;
+  const mph = Math.max(0.1, state.speedMph);
+
+  // Sidewalk vs non-sidewalk distance. Prefix/suffix never land on
+  // sidewalks (findNearestEdgeProjection skips them), so subtracting
+  // sidewalk-edge length from totalLengthFt leaves all non-sidewalk
+  // distance — including the mid-edge prefix/suffix slices.
+  let sidewalkFt = 0;
+  for (const eid of r.pathEdgeIds) {
+    if (graph.edgeIsSidewalk(eid)) sidewalkFt += graph.edgeLengthFt(eid);
+  }
+  const baseFt = Math.max(0, r.totalLengthFt - sidewalkFt);
+  const baseSec     = (baseFt     / 5280) / mph * 3600;
+  const sidewalkSec = (sidewalkFt / 5280) / 5   * 3600;
+
+  let climbSec = 0;
+  if (graph.hasElevation) {
+    const series = buildElevationSeries(graph, r);
+    const stats = climbStats(series);
+    climbSec = 2 * stats.totalUphillFt - 0.5 * stats.totalDownhillFt;
+  }
+
+  let stopSec = 0, signalSec = 0;
+  const nodes = r.pathNodeIds, edges = r.pathEdgeIds;
+  for (let i = 1; i < nodes.length - 1; i++) {
+    const nid = nodes[i];
+    if (graph.nodeFlags(nid).hasSignal) signalSec += 10;
+    const bearing = graph.edgeBearingEnd(edges[i - 1]);
+    if (graph.hasStopFacing(nid, bearing)) stopSec += 2;
+  }
+
+  return baseSec + sidewalkSec + climbSec + signalSec + stopSec;
 }
 
 // ---------- address inputs + dropdowns ----------
@@ -1637,6 +1924,21 @@ function setPresetUI(state) {
   });
 }
 
+// "Enable sidewalks" checkbox under the Comfort/Athletic segmented
+// control. Flipping it re-runs A* against the same endpoints with the
+// new `enableSidewalks` flag in the weights — long sidewalks (> 50 ft)
+// are gated by this; short ones (≤ 50 ft) stay routable either way.
+function wireSidewalksToggle(state) {
+  const cb = document.getElementById('toggle-sidewalks');
+  if (!cb) return;
+  cb.checked = state.sidewalksEnabled;
+  cb.addEventListener('change', () => {
+    state.sidewalksEnabled = cb.checked;
+    saveSidewalksEnabledToStorage(state.sidewalksEnabled);
+    if (state.startSpec && state.endSpec) compute(state);
+  });
+}
+
 function formatSliderVal(v) {
   const n = Math.round(Number(v) * 10);
   return `${n}<span class="slider-val-denom">/10</span>`;
@@ -1687,6 +1989,16 @@ function loadDebugEnabledFromStorage() {
 }
 function saveDebugEnabledToStorage(enabled) {
   try { localStorage.setItem(LS_DEBUG_ENABLED, enabled ? 'true' : 'false'); } catch {}
+}
+function loadSidewalksEnabledFromStorage() {
+  try {
+    const v = localStorage.getItem(LS_SIDEWALKS_ENABLED);
+    if (v === 'true') return true;
+  } catch {}
+  return false;
+}
+function saveSidewalksEnabledToStorage(enabled) {
+  try { localStorage.setItem(LS_SIDEWALKS_ENABLED, enabled ? 'true' : 'false'); } catch {}
 }
 function loadLocFromStorage(key) {
   try {
@@ -1756,7 +2068,13 @@ function addGraphDebugLayers(map, graph) {
     edgeFeatures.push({
       type: 'Feature',
       geometry: { type: 'LineString', coordinates: graph.geoms[gIdx] },
-      properties: { slopePct: Math.round(slopePct * 100) / 100 },
+      properties: {
+        slopePct: Math.round(slopePct * 100) / 100,
+        // Used by the second layer's filter — sidewalks render as
+        // dashed lines (still slope-colored) so they're visibly
+        // distinguishable from on-street edges in the overlay.
+        isSidewalk: graph.edgeIsSidewalk(edgeId),
+      },
     });
   }
 
@@ -1777,23 +2095,49 @@ function addGraphDebugLayers(map, graph) {
   // 26% steepest-real-street ceiling: ≥20% is "off-the-chart" purple,
   // either a sustained real climb or a residual artifact at a hard-case
   // multi-level junction where the heat eq smoothed across grade.
+  // Shared step-color expression for both road and sidewalk debug layers
+  // so the same slope reads the same color whether you're on a road or
+  // a sidewalk.
+  const SLOPE_COLOR = [
+    'step', ['abs', ['get', 'slopePct']],
+    '#dddddd',          // 0-1%   essentially flat
+    1,  '#81c784',      // 1-3%   gentle
+    3,  '#fff176',      // 3-6%   moderate
+    6,  '#ffa726',      // 6-10%  hilly
+    10, '#ef5350',      // 10-15% steep
+    15, '#b71c1c',      // 15-20% very steep
+    20, '#4a148c',      // 20%+   extreme (above Seattle's real max)
+  ];
+  const SLOPE_WIDTH = ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 2.0];
+
+  // Roads: solid lines.
   map.addLayer({
     id: 'graph-debug-edges',
     type: 'line',
     source: 'graph-debug-edges',
+    filter: ['!=', ['get', 'isSidewalk'], true],
     paint: {
-      'line-color': [
-        'step', ['abs', ['get', 'slopePct']],
-        '#dddddd',          // 0-1%   essentially flat
-        1,  '#81c784',      // 1-3%   gentle
-        3,  '#fff176',      // 3-6%   moderate
-        6,  '#ffa726',      // 6-10%  hilly
-        10, '#ef5350',      // 10-15% steep
-        15, '#b71c1c',      // 15-20% very steep
-        20, '#4a148c',      // 20%+   extreme (above Seattle's real max)
-      ],
-      'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 2.0],
+      'line-color': SLOPE_COLOR,
+      'line-width': SLOPE_WIDTH,
       'line-opacity': 0.85,
+    },
+    layout: { visibility: 'none' },
+  });
+  // Sidewalks: dashed, same color ramp. The dash pattern makes them
+  // visually distinguishable from on-street edges at a glance while
+  // still showing the slope-step color so the debug overlay reads as
+  // "everything in the routing graph, colored by slope." Dasharray is
+  // in line-widths, so the 2/2 pattern stays proportional at any zoom.
+  map.addLayer({
+    id: 'graph-debug-sidewalk-edges',
+    type: 'line',
+    source: 'graph-debug-edges',
+    filter: ['==', ['get', 'isSidewalk'], true],
+    paint: {
+      'line-color': SLOPE_COLOR,
+      'line-width': SLOPE_WIDTH,
+      'line-opacity': 0.85,
+      'line-dasharray': [2, 2],
     },
     layout: { visibility: 'none' },
   });

@@ -162,7 +162,9 @@ function wireToggles(map) {
   // isn't loaded yet at this point). VisibilityManager.apply() skips
   // missing layers silently, and we'll call vm.apply() again once the
   // layers actually exist.
-  vm.group('graph-debug',          ['graph-debug-edges', 'graph-debug-nodes']);
+  vm.group('graph-debug',          ['graph-debug-edges',
+                                    'graph-debug-sidewalk-edges',
+                                    'graph-debug-nodes']);
 
   vm.bindCheckbox('aaa',         'toggle-aaa',         persisted)
     .bindCheckbox('bbl',         'toggle-bbl',         persisted)

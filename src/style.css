@@ -347,6 +347,71 @@ body {
 }
 .settings-toggle input[type="checkbox"] { accent-color: #e91e63; }
 
+/* ============ Sidewalks toggle under the Riding-style segmented control ============ */
+
+.sidewalks-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  margin-top: 8px;
+  color: #444;
+  /* Positioned ancestor for `.info-tip::after` so the tooltip can
+   * anchor to the row edges (left/right) instead of the icon. */
+  position: relative;
+}
+.sidewalks-toggle input[type="checkbox"] { accent-color: #e91e63; }
+
+/* Info icon + tooltip primitive. The tooltip text is read from
+ * `data-tip` on the .info-tip element; ::after renders it as a
+ * positioned bubble (against .sidewalks-toggle, not the icon) that
+ * shows on :hover and :focus-visible (the latter so keyboard-tab +
+ * touch-tap also reveal it). */
+.info-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: #888;
+  cursor: help;
+  outline: none;
+}
+.info-tip .material-symbols-outlined { font-size: 18px; }
+.info-tip:hover, .info-tip:focus-visible { color: #e91e63; }
+/* The tooltip's containing block is the whole .sidewalks-toggle row
+ * (which spans the panel width). On desktop the panel is 360 px; on
+ * mobile the panel spans the viewport. The bubble anchors to the
+ * row's left and right edges with `left: 8px; right: 8px`, so its
+ * width tracks the panel and text wraps onto multiple lines as
+ * needed. Same rule on both viewports — no @media override. */
+.info-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  right: 8px;
+  background: #333;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+  padding: 6px 8px;
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s, visibility 0.12s;
+  pointer-events: none;
+  z-index: 100;
+  white-space: normal;
+}
+.info-tip:hover::after, .info-tip:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
 /* ============ Route endpoint rows (swap + per-input X) ============ */
 /* Mirrors .settings-loc-row styling for the X buttons so the routing
  * panel matches the Home/Work editor in the Settings modal. */
@@ -564,11 +629,40 @@ body {
 
 /* ============ Directions panel ============ */
 
-.route-loading, .route-error, .route-hint {
+.route-error, .route-hint {
   margin: 0;
   color: #555;
 }
 .route-error { color: #b03030; }
+
+/* "Computing route…" loading state. Centered with breathing room above
+ * and below, with animated dots that fade in/out in staggered sequence. */
+.route-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 36px 16px;
+  min-height: 96px;
+  color: #555;
+  font-size: 15px;
+}
+.route-loading-dots {
+  display: inline-block;
+  width: 1.6em;
+  text-align: left;
+  margin-left: 1px;
+}
+.route-loading-dots span {
+  display: inline-block;
+  animation: route-loading-blink 1.2s infinite ease-in-out;
+  opacity: 0;
+}
+.route-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+.route-loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes route-loading-blink {
+  0%, 80%, 100% { opacity: 0; }
+  40%           { opacity: 1; }
+}
 
 /* Tab strip — shown only when there's >1 route. Each tab swaps which
  * route is the primary pink line on the map and shows that route's
@@ -905,11 +999,14 @@ body {
     display: flex;
     flex-direction: column;
     background: #fff;
-    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.18);
-    border-top-left-radius: 14px;
-    border-top-right-radius: 14px;
+    box-shadow: 0 -4px 10px rgba(0, 0, 0, 0.18);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
     transition: transform 220ms cubic-bezier(.2,.7,.2,1);
-    transform: translateY(calc(100vh - 200px));
+    /* Initial peek before sheet.js runs — must match PEEK_HEIGHT in
+     * src/sheet.js (148 px). Otherwise the sheet flashes at this
+     * height and then resnaps to the JS value once initSheet executes. */
+    transform: translateY(calc(100vh - 148px));
   }
   #sheet.dragging { transition: none; }
 

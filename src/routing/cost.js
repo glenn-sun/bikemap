@@ -54,12 +54,31 @@ export const TWISTS = [
 // counts as a "turn" worth a maneuver) — not a user preference.
 export const TURN_THRESHOLD_DEG = 30;
 
+// Sidewalk routing constants.
+//   SIDEWALK_MULTIPLIER  — fixed 3× cost multiplier on every sidewalk
+//                          edge (not user-tunable). The high penalty
+//                          ensures sidewalks are picked only when the
+//                          road alternative is materially worse.
+//   SHORT_SIDEWALK_FT    — sidewalk segments ≤ this length are always
+//                          allowed even when the user has disabled
+//                          sidewalks. They typically represent trail/
+//                          street stitching gaps where OSM uses a short
+//                          footway as the connector. Longer sidewalks
+//                          (along-road walks) are gated by the toggle.
+export const SIDEWALK_MULTIPLIER = 3.0;
+export const SHORT_SIDEWALK_FT = 50;
+
 function clip01(v) { return Math.max(0, Math.min(1, v ?? 0.5)); }
 
 /** Build a full weights object from a slider snapshot.
  * `signCoverageMax` is supplied externally (per preset).
+ * `enableSidewalks` (optional) — when true, long sidewalk segments (> 50 ft)
+ *   are usable at a fixed 3× penalty. When false, only short sidewalk
+ *   segments (≤ 50 ft, treated as crossings/connectors) are usable; long
+ *   sidewalks return Infinity from edgeMultiplier and are skipped by A*.
  */
-export function weightsFromSliders(s, signCoverageMax = SIGN_COV_BY_PRESET.custom) {
+export function weightsFromSliders(s, signCoverageMax = SIGN_COV_BY_PRESET.custom,
+                                    enableSidewalks = false) {
   const s1 = clip01(s.s1), s2 = clip01(s.s2), s3 = clip01(s.s3),
         s4 = clip01(s.s4), s5 = clip01(s.s5);
   return {
@@ -106,19 +125,22 @@ export function weightsFromSliders(s, signCoverageMax = SIGN_COV_BY_PRESET.custo
     // The 2% threshold matches `STEEP_THRESHOLD` baked into
     // build_elevation.py's per-edge `steepFt2` precompute.
     steepCoeff:        400 * s5,
+    enableSidewalks,                     // gates long sidewalks (> 50 ft)
     sliders: { s1, s2, s3, s4, s5 },     // diagnostic / for UI display
   };
 }
 
 /** Weights for a named preset (athletic | comfort). */
-export function weightsForPreset(name) {
+export function weightsForPreset(name, enableSidewalks = false) {
   if (!(name in PRESETS)) throw new Error(`unknown preset: ${name}`);
-  return weightsFromSliders(PRESETS[name], SIGN_COV_BY_PRESET[name]);
+  return weightsFromSliders(PRESETS[name], SIGN_COV_BY_PRESET[name],
+                            enableSidewalks);
 }
 
 /** Weights for the Custom preset: sliders user-controlled. */
-export function weightsForCustom(sliders) {
-  return weightsFromSliders(sliders, SIGN_COV_BY_PRESET.custom);
+export function weightsForCustom(sliders, enableSidewalks = false) {
+  return weightsFromSliders(sliders, SIGN_COV_BY_PRESET.custom,
+                            enableSidewalks);
 }
 
 /** Apply a twist's delta map to a slider snapshot, clipping to [0, 1]. */
@@ -136,6 +158,16 @@ export function applyTwistToSliders(sliders, twistId) {
 
 /** Multiplier on edge length. */
 export function edgeMultiplier(weights, graph, edgeId) {
+  // Sidewalks short-circuit ahead of every other classification. Short
+  // segments (≤ 50 ft) are always usable at a fixed 3× penalty since
+  // they're typically the OSM-data-quality "connector" between a trail
+  // and a roadway. Longer sidewalks (along-road walks) are blocked
+  // unless the user explicitly enabled them.
+  if (graph.edgeIsSidewalk(edgeId)) {
+    const len = graph.edgeLengthFt(edgeId);
+    if (len <= SHORT_SIDEWALK_FT) return SIDEWALK_MULTIPLIER;
+    return weights.enableSidewalks ? SIDEWALK_MULTIPLIER : Infinity;
+  }
   const lanes = graph.edgeLanes(edgeId);
   const cat   = graph.edgeFacility(edgeId);
   if (cat && cat in weights.facBase) {
@@ -220,6 +252,16 @@ function axisAngleDeg(a, b) {
  *  (i.e. cyclist is on the through-street of a 2-way stop, or it's a
  *  4-way stop). */
 export function crossingPenaltyFt(weights, graph, nodeId, prevEdgeId, nextEdgeId) {
+  // When the cyclist is staying on the sidewalk past an intersection
+  // (prev = sidewalk, next = sidewalk), the existing road-on-road
+  // perpendicular-crossing logic would wrongly fire because the
+  // physically-parallel main road would qualify as a cross-street. But
+  // the sidewalk itself doesn't cross the perpendicular street — the
+  // pedestrian throat just continues. The real road-crossing event is
+  // charged via `sidewalkCrossingPenaltyFt` on the crosswalk edge.
+  if (prevEdgeId != null
+      && graph.edgeIsSidewalk(prevEdgeId)
+      && graph.edgeIsSidewalk(nextEdgeId)) return 0;
   const flags = graph.nodeFlags(nodeId);
   if (flags.hasSignal || flags.hasCrosswalk || flags.hasBeacon) return 0;
   const incident = graph.outgoingEdges(nodeId);
@@ -271,4 +313,34 @@ export function crossingPenaltyFt(weights, graph, nodeId, prevEdgeId, nextEdgeId
   if (graph.hasStopFacing(nodeId, crossBearingStart)
       && graph.hasStopFacing(nodeId, crossBearingStart + 180)) return 0;
   return crossingPenaltyByLanes(weights, crossLanes);
+}
+
+/** Crosswalk penalty: fired at the entry node of a crosswalk sidewalk
+ *  segment (a sidewalk that 2D-crosses a road). The penalty is keyed
+ *  off the crossed road's lane count and is zeroed by the same
+ *  signal/crosswalk/beacon flags as the regular crossing penalty.
+ *
+ *  This complements `crossingPenaltyFt`: the regular penalty handles
+ *  road-on-road perpendicular crossings; this one handles
+ *  sidewalk-on-road crossings (where the cyclist is traversing the
+ *  crosswalk edge itself rather than going-straight at a road
+ *  intersection). At a signalized crossing, both zero out; at an
+ *  unsignalized one, the cyclist pays the same lane-keyed penalty
+ *  whether they're a car going straight or a sidewalk-walker
+ *  crossing — both wait on the same cross traffic.
+ *
+ *  Returns 0 when `nextEdgeId` is not a crosswalk (data-driven: only
+ *  sidewalks with crosswalkLanes > 0 from build_graph.py annotate). */
+export function sidewalkCrossingPenaltyFt(weights, graph, nodeId, nextEdgeId) {
+  const lanes = graph.edgeCrosswalkLanes(nextEdgeId);
+  if (lanes == null || lanes <= 0) return 0;
+  const flags = graph.nodeFlags(nodeId);
+  if (flags.hasSignal || flags.hasCrosswalk || flags.hasBeacon) return 0;
+  // 2-way / 4-way stop on the crossed road — check both axes
+  // perpendicular to the crosswalk's bearing.
+  const crosswalkBearing = graph.edgeBearingStart(nextEdgeId);
+  const crossAxis = (crosswalkBearing + 90) % 360;
+  if (graph.hasStopFacing(nodeId, crossAxis)
+      && graph.hasStopFacing(nodeId, crossAxis + 180)) return 0;
+  return crossingPenaltyByLanes(weights, lanes);
 }

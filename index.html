@@ -91,6 +91,15 @@
             <input type="radio" name="route-preset" id="preset-custom" value="custom" />
             <label for="preset-custom" id="preset-custom-label" title="Tune the sliders in Settings">Custom</label>
           </div>
+          <label class="sidewalks-toggle" for="toggle-sidewalks">
+            <input type="checkbox" id="toggle-sidewalks" />
+            <span>Enable sidewalks</span>
+            <span class="info-tip" tabindex="0" role="button"
+                  aria-label="Sidewalk routing details"
+                  data-tip="Sidewalks under 50 ft are always enabled, due to data limitations. It is illegal for e-scooters to ride on sidewalks.">
+              <span class="material-symbols-outlined">info</span>
+            </span>
+          </label>
         </section>
       </div>
       <div id="directions-panel" hidden></div>

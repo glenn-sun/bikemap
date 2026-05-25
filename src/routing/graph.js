@@ -117,6 +117,23 @@ class Graph {
   edgeIsTunnel(id)      { return (this.e.flags[id] & 8) !== 0; }
   edgeIsCovered(id)     { return (this.e.flags[id] & 16) !== 0; }
   edgeIsIndoor(id)      { return (this.e.flags[id] & 32) !== 0; }
+  /** This edge is an OSM sidewalk or crosswalk (highway=footway +
+   *  footway=sidewalk|crossing). cost.js applies a fixed 3× multiplier
+   *  and the "Enable sidewalks" toggle gates segments >50 ft. */
+  edgeIsSidewalk(id)    { return (this.e.flags[id] & 1024) !== 0; }
+  /** Compass bearing (deg) from the nearest parallel road centerline TO
+   *  the sidewalk midpoint. Used by directions.js to phrase "right
+   *  sidewalk of <Street>". null when not a sidewalk or no nearby
+   *  parallel road. */
+  edgeSidewalkBearing(id) {
+    return this.e.sidewalkBearing ? this.e.sidewalkBearing[id] : null;
+  }
+  /** Lane count of the most-laned road this sidewalk 2D-crosses
+   *  (crosswalk segments only). Used to charge the unsignalized-crossing
+   *  penalty when entering the crosswalk. null when not a crosswalk. */
+  edgeCrosswalkLanes(id) {
+    return this.e.crosswalkLanes ? this.e.crosswalkLanes[id] : null;
+  }
   /** OSM `embankment=yes` — way runs on a raised earthwork. DTM is
    *  generally correct here (earthworks are part of the terrain), but
    *  the tag is informational and feeds approach detection. */
@@ -349,6 +366,11 @@ class Graph {
       // street network) would otherwise become snap targets and produce
       // unreachable routes.
       if (this._nodeComp[this.e.from[eid]] !== mainComp) return;
+      // Don't snap a route endpoint to a sidewalk — the parallel road is
+      // typically a few feet away and is the user-meaningful "I'm here"
+      // location. Sidewalks remain in the graph for routing-through but
+      // are never selected as start/end points.
+      if ((this.e.flags[eid] & 1024) !== 0) return;
       const gIdx = this.e.geom[eid];
       const geom = this.geoms[gIdx];
       for (let i = 1; i < geom.length; i++) {

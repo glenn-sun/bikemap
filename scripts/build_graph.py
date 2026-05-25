@@ -53,6 +53,12 @@ ROAD_HIGHWAYS = {
 CYCLEWAY_HIGHWAYS = {"cycleway"}
 # Pedestrian-ish types — require explicit bike access tag, else skipped.
 RESTRICTED_HIGHWAYS = {"path", "footway", "track", "pedestrian"}
+# Sidewalks (and crossings) are now also routable as a last-resort option;
+# they're flagged separately and the routing engine applies a fixed 3×
+# multiplier to discourage their use unless absolutely necessary. Tagging
+# is OSM `highway=footway` + `footway in (sidewalk, crossing)`. Crossings
+# are typically short (≤ 50 ft) segments perpendicular to a road; the
+# engine ALWAYS allows segments ≤ 50 ft regardless of the user toggle.
 
 # Hardcoded refusals — never route on these even with bicycle=yes.
 NEVER = {"motorway", "motorway_link", "trunk", "trunk_link", "construction",
@@ -291,6 +297,19 @@ def parse_osm(elements, seattle_poly):
     return nodes, edges
 
 
+def _is_sidewalk(tags):
+    """OSM tag heuristic for 'this way is a sidewalk or crosswalk'.
+
+    These come in as `highway=footway` + `footway=sidewalk|crossing` (the
+    most common pattern in Seattle OSM). Treated as routable but heavily
+    penalized — see `is_sidewalk` flag handling in cost.js. NOT included
+    in any other classification (no cycleway, no AAA).
+    """
+    if tags.get("highway") != "footway":
+        return False
+    return tags.get("footway") in ("sidewalk", "crossing")
+
+
 def _is_bike_routable(tags):
     """OSM tag heuristic for 'a bike can ride here'."""
     hw = tags.get("highway")
@@ -302,6 +321,10 @@ def _is_bike_routable(tags):
         if tags.get("bicycle") not in ("yes", "designated", "permissive"):
             return False
     if hw in ROAD_HIGHWAYS or hw in CYCLEWAY_HIGHWAYS:
+        return True
+    # Sidewalks/crossings are admitted unconditionally — cost.js applies a
+    # 3× multiplier and an "Enable sidewalks" toggle gates the long ones.
+    if _is_sidewalk(tags):
         return True
     if hw in RESTRICTED_HIGHWAYS:
         return tags.get("bicycle") in ("yes", "designated")
@@ -370,7 +393,12 @@ def spatial_join_streets(edges, streets_path):
     matched = 0
     skipped_trails = 0
     for e in edges:
-        if e["tags"].get("highway") in TRAIL_HIGHWAYS:
+        # Trails and sidewalks both opt out of street-attribute join —
+        # sidewalks are close enough to a parallel road that the
+        # nearest-feature contest would assign the road's
+        # ONEWAY/SURFACEWIDTH to the sidewalk, falsely making it
+        # one-way and inflating its "lane" count.
+        if e["tags"].get("highway") in TRAIL_HIGHWAYS or _is_sidewalk(e["tags"]):
             e["sdot"] = {}
             skipped_trails += 1
             continue
@@ -518,6 +546,13 @@ def spatial_join_facilities(edges, data_dir):
     matched = 0
     matched_by_cat: dict[str, int] = {}
     for e in edges:
+        # Sidewalks must never inherit AAA / BBL / BL classification from
+        # a parallel bike facility — they're sidewalks, not bike infra,
+        # and routing through them is explicitly penalized.
+        if _is_sidewalk(e["tags"]):
+            e["facility_category"] = None
+            e["facility_model_type"] = None
+            continue
         best_cat = None
         best_model = None
         for pt in sample_along(e["geom"], n=3):
@@ -697,6 +732,98 @@ def collapse_traffic_circles(nodes, edges, circles_path, extra_circle_pts=None):
     return new_edges, is_circle
 
 
+# ---------- Sidewalk classification ----------
+
+def annotate_sidewalks(edges, max_road_search_ft=40.0):
+    """For each sidewalk edge, record (a) the perpendicular compass bearing
+    from the nearest parallel road centerline to the sidewalk midpoint
+    (`sidewalk_offset_bearing`), used at runtime to phrase "right sidewalk
+    of <Street>" instructions, and (b) the lane count of the most-laned
+    road that the sidewalk 2D-crosses (`crosswalk_lanes`), used to charge
+    a crossing penalty when traversing a crosswalk segment over an
+    unsignalized road.
+
+    Both attributes are None on non-sidewalk edges (and on sidewalks with
+    no nearby road / no road 2D-crossing).
+    """
+    print("  annotating sidewalks (side + crosswalk lanes)...")
+    sw_edges = [e for e in edges if _is_sidewalk(e["tags"])]
+    if not sw_edges:
+        for e in edges:
+            e["sidewalk_offset_bearing"] = None
+            e["crosswalk_lanes"] = None
+        print(f"    no sidewalk edges in graph")
+        return
+
+    road_edges = [e for e in edges if e["tags"].get("highway") in ROAD_HIGHWAYS]
+    if not road_edges:
+        for e in edges:
+            e["sidewalk_offset_bearing"] = None
+            e["crosswalk_lanes"] = None
+        return
+    road_geoms = [e["geom"] for e in road_edges]
+    tree = STRtree(road_geoms)
+
+    # Convert max search distance from feet to degrees (Seattle ~lat 47).
+    deg_per_ft_lat = 1.0 / 364000
+    SEARCH_DEG = max_road_search_ft * deg_per_ft_lat
+
+    n_side, n_crosswalk = 0, 0
+    for sw in sw_edges:
+        mid = sw["geom"].interpolate(0.5, normalized=True)
+
+        # ---- offset bearing: nearest parallel road centerline ----
+        nearest_road = None
+        nearest_d = float("inf")
+        nearest_proj_pt = None
+        for idx in tree.query(mid.buffer(SEARCH_DEG)):
+            road = road_edges[idx]
+            d = road["geom"].distance(mid)
+            if d < nearest_d and d <= SEARCH_DEG:
+                nearest_d = d
+                nearest_road = road
+                # Project sidewalk midpoint onto the road centerline.
+                t = road["geom"].project(mid, normalized=True)
+                nearest_proj_pt = road["geom"].interpolate(t, normalized=True)
+        if nearest_proj_pt is not None:
+            ob = initial_bearing((nearest_proj_pt.x, nearest_proj_pt.y),
+                                  (mid.x, mid.y))
+            sw["sidewalk_offset_bearing"] = round(ob, 1)
+            n_side += 1
+        else:
+            sw["sidewalk_offset_bearing"] = None
+
+        # ---- crosswalk lanes: max lanes among 2D-crossed roads ----
+        max_lanes = 0.0
+        for idx in tree.query(sw["geom"]):
+            road = road_edges[idx]
+            # `crosses` is strict — proper 2D X-pattern crossing, not just
+            # touching at an endpoint. Sidewalks running parallel to a
+            # road return False; sidewalks tagged as crosswalks return True.
+            if not sw["geom"].crosses(road["geom"]):
+                continue
+            sdot = road.get("sdot", {})
+            lanes = derive_lanes(sdot.get("SURFACEWIDTH"))
+            if lanes is None:
+                lanes = fallback_lanes_from_artclass(sdot.get("ARTCLASS"))
+            if lanes > max_lanes:
+                max_lanes = lanes
+        if max_lanes > 0:
+            sw["crosswalk_lanes"] = round(max_lanes, 2)
+            n_crosswalk += 1
+        else:
+            sw["crosswalk_lanes"] = None
+
+    # Fill in None for non-sidewalk edges.
+    for e in edges:
+        if "sidewalk_offset_bearing" not in e:
+            e["sidewalk_offset_bearing"] = None
+        if "crosswalk_lanes" not in e:
+            e["crosswalk_lanes"] = None
+    print(f"    {len(sw_edges):,} sidewalk edges; "
+          f"{n_side:,} sided, {n_crosswalk:,} 2D-cross a road")
+
+
 # ---------- Per-edge constants ----------
 
 def haversine_ft(p1, p2):
@@ -852,6 +979,20 @@ def expand_to_directed(nodes, edges, is_circle):
         except ValueError:
             layer = None
 
+        # Sidewalk metadata (None on non-sidewalk edges). Computed once
+        # for the undirected segment in annotate_sidewalks(); the same
+        # offset bearing and crosswalk lane count apply to both
+        # directions of travel.
+        is_sidewalk = _is_sidewalk(e["tags"])
+        sw_bearing  = e.get("sidewalk_offset_bearing")
+        crosswalk_l = e.get("crosswalk_lanes")
+        # Override the SDOT-inferred lane count for sidewalks — a sidewalk
+        # is one pedestrian-width "lane", not the parallel road's 3+ car
+        # lanes, and the crossing-penalty inner loop reads `lanes` to
+        # decide whether the cyclist is on a "big" road.
+        if is_sidewalk:
+            lanes = 1.0
+
         for (_, nseq, cseq, b0, b1) in directions:
             out.append({
                 "from": nseq[0],
@@ -865,6 +1006,9 @@ def expand_to_directed(nodes, edges, is_circle):
                 "isIndoor":     is_indoor,
                 "isEmbankment": is_embankment,
                 "isCutting":    is_cutting,
+                "isSidewalk":   is_sidewalk,
+                "sidewalkBearing": sw_bearing,
+                "crosswalkLanes":  crosswalk_l,
                 "layer":        layer,
                 "slopePct":  slope_pct,
                 "facilityCategory": e.get("facility_category"),
@@ -1434,6 +1578,8 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
     e_slopePct = []
     e_layer = []
     e_approachOf = []
+    e_sidewalkBearing = []
+    e_crosswalkLanes = []
 
     for i, e in enumerate(directed_edges):
         fr = remap[e["from"]]; to = remap[e["to"]]
@@ -1444,6 +1590,7 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
         #   16 = isCovered          32 = isIndoor
         #   64 = isUntaggedCrossing 128 = isApproach
         #  256 = isEmbankment      512 = isCutting
+        # 1024 = isSidewalk
         # Bridge / tunnel / covered / indoor / embankment / cutting are
         # independent OSM elevation-related flags — same edge can have
         # multiple set. Bridge and tunnel indicate the DTM is structurally
@@ -1466,6 +1613,7 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
         if i in approach_edges:     flags |= 128
         if e.get("isEmbankment"):  flags |= 256
         if e.get("isCutting"):     flags |= 512
+        if e.get("isSidewalk"):    flags |= 1024
         e_from.append(fr); e_to.append(to)
         e_lenFt.append(e["lengthFt"]); e_lanes.append(e["lanes"])
         e_flags.append(flags)
@@ -1477,6 +1625,8 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
         e_slopePct.append(e.get("slopePct"))
         e_layer.append(e.get("layer"))
         e_approachOf.append(approach_edges.get(i))   # str or None
+        e_sidewalkBearing.append(e.get("sidewalkBearing"))
+        e_crosswalkLanes.append(e.get("crosswalkLanes"))
         n_edges[fr].append(i)
 
     bbox = [min(n_lon), min(n_lat), max(n_lon), max(n_lat)]
@@ -1526,6 +1676,16 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
             # "indoor", or null. Ties broken by APPROACH_PRIORITY order
             # (bridge > tunnel > layered > covered > indoor).
             "approachOf": e_approachOf,
+            # Sidewalk-only fields (null on non-sidewalk edges). See
+            # annotate_sidewalks(). `sidewalkBearing` is the perpendicular
+            # compass bearing FROM the nearest parallel road centerline
+            # TO the sidewalk midpoint, used at runtime to phrase
+            # "left/right sidewalk of <Street>". `crosswalkLanes` is the
+            # lane count of the most-laned road this sidewalk 2D-crosses,
+            # used to charge the unsignalized-crossing penalty when
+            # traversing a crosswalk.
+            "sidewalkBearing": e_sidewalkBearing,
+            "crosswalkLanes":  e_crosswalkLanes,
         },
     }
     out_path.write_text(json.dumps(payload, separators=(",", ":")))
@@ -1563,6 +1723,9 @@ def main():
 
     print("Step E: spatial-join all AAA-rendered facility sources...")
     spatial_join_facilities(edges, DATA)
+
+    print("Step E.1: annotate sidewalks with side + crosswalk lanes...")
+    annotate_sidewalks(edges)
 
     print("Step F: snap intersection-control points to nodes...")
     control_flags = snap_control_points(

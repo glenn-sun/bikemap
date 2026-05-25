@@ -629,6 +629,56 @@ API:
 - `applyTwistToSliders(sliders, twistId)` — add a twist's deltas, clip
   to [0, 1]
 
+### Sidewalks
+
+OSM `highway=footway` + `footway in (sidewalk, crossing)` ways are
+admitted to the graph as a last-resort option (bit 1024 on
+`edges.flags`). The routing engine never picks sidewalks unless the
+road alternative is materially worse.
+
+- **Fixed 3× multiplier** for every sidewalk edge — not user-tunable.
+  Constants `SIDEWALK_MULTIPLIER` and `SHORT_SIDEWALK_FT` live in
+  `cost.js`.
+- **"Enable sidewalks" toggle** under the Comfort/Athletic segmented
+  control gates the LONG ones (> 50 ft). Short sidewalks (≤ 50 ft)
+  are always allowed regardless — they typically represent the OSM-
+  data-quality "connector" between a trail and a roadway (e.g. a few-
+  foot footway at the end of a path), and blocking them would sever
+  connectivity. Persisted to `bikemap-routing-sidewalks-enabled`.
+- **Snap targets exclude sidewalks** — `findNearestEdgeProjection`
+  skips bit-1024 edges so route start/end always lands on a roadway
+  even when the user clicked closer to a sidewalk.
+- **Side of road** is computed once at build time
+  (`annotate_sidewalks` in `build_graph.py`): perpendicular compass
+  bearing FROM the nearest parallel road centerline TO the sidewalk
+  midpoint, stored as `edges.sidewalkBearing[]`. At runtime,
+  `sidewalkSideFromBearings(cyclistHeading, offsetBearing)` in
+  `directions.js` resolves to "left" / "right" relative to the
+  cyclist's direction of travel. Used to phrase "Continue on the
+  right sidewalk of Brooklyn Ave".
+- **Crossing penalty interactions:**
+  1. `crossingPenaltyFt` returns 0 when BOTH prev and next edges are
+     sidewalks — staying on a sidewalk past an intersection (sidewalk
+     continuity through the pedestrian throat) is not a real
+     road-crossing event.
+  2. A separate `sidewalkCrossingPenaltyFt` fires when ENTERING a
+     crosswalk segment (a sidewalk that 2D-crosses a road, detected
+     at build time and recorded in `edges.crosswalkLanes[]`). Zeroed
+     by the same signal/crosswalk/beacon/stop flags as the road-on-
+     road penalty. This lets A* discover the pattern: walk along
+     sidewalk → reach signalized intersection → cross at 0 penalty →
+     continue along sidewalk on the other side.
+- **Infra summary bar** gains a gray "Sidewalk" section
+  (`#9e9e9e`) when the active route uses any sidewalk.
+- **Elevation pipeline:** sidewalks are at-grade, so they get
+  regular DTM samples + analytic climb metrics like any other
+  ground-level edge. The heat-eq correction triggers only on bits
+  4/8/64/128 (bridge/tunnel/untagged-crossing/approach) — bit 1024
+  is independent. A sidewalk on a bridge would carry the bridge tag
+  too and get fixed normally; a sidewalk crossing a road at-grade
+  may pick up `isUntaggedCrossing` and get heat-eq smoothed between
+  road boundary nodes, which is exactly right.
+
 ### Twist alternates (verified algorithm)
 
 `findPathsMulti(primaryWeights, graph, start, end, twistRuns)` always
@@ -778,7 +828,14 @@ when off), and Attributions. Click outside the modal content to close.
   enters click-to-place for that input only.
 - A blue dot (`.user-location-dot`) tracks the user's GPS position on
   the map at all times once permission is granted. The watch starts on
-  app boot in `routing/ui.js` (`startUserLocationTracking`).
+  app boot in `routing/ui.js` (`startUserLocationTracking`). Two
+  watchers run in parallel: a high-accuracy GPS watcher and a
+  low-accuracy (WiFi/IP) watcher. The high-accuracy one wins when
+  available; the low-accuracy one provides indoor coverage where GPS
+  silently times out. `requestLocationOnce` (one-shot for "My location"
+  picks) reuses `state.userLocation` if already set, otherwise tries
+  high-accuracy → low-accuracy fallback before giving up. Fixes the
+  intermittent "permission is on but location fails" failure mode.
 - `src/routing/mode.js` carries the shared mode flag.
   `popups.js` imports `isChoosingOnMap()` and bails out of its per-layer
   popup handlers so you can click a bike-rack icon to set an endpoint
@@ -820,7 +877,13 @@ JSON-encoded under these keys:
 - `bikemap-routing-custom-enabled` — `"true" | "false"` (default `"false"`); when `false`, the Custom button is hidden from the segmented control and the slider section is grayed out in Settings.
 - `bikemap-routing-debug-enabled` — `"true" | "false"` (default `"false"`); when `false`, the Routing debug fieldset in the layers panel is hidden and all 6 debug toggles are force-cleared at boot.
 - `bikemap-cycling-speed-mph` — number, 4–25, default 10 (drives the
-  predicted-minutes display)
+  predicted-minutes display). The display estimate is **display-only**
+  — routing is unaffected. `predictedMinutes(state, route)` in
+  `routing/ui.js` sums: base distance ÷ stated mph + sidewalk distance
+  ÷ 5 mph (sidewalks always 5 mph regardless of stated speed) + 2 s/ft
+  total climb − 0.5 s/ft total descent (from `climbStats`, no grade
+  term) + 10 s per signal at an interior path node + 2 s per stop sign
+  facing the cyclist's bearing at an interior node. Clamped to ≥ 1 min.
 - `bikemap-saved-home`, `bikemap-saved-work` — `{ label, lon, lat }`
 - `bikemap-toggles` — `{ groupName: bool }` diff vs HTML defaults (only
   groups that have been toggled away from default are stored)
@@ -871,7 +934,12 @@ In the "Routing debug" fieldset:
   absolute slope, with each node as a small dark-pink circle. Edges
   deduped by `geomIndex`; slope = `(elev_to − elev_from) / lengthFt`
   computed in the UI from `nodes.elev[]` (which is heat-eq-corrected on
-  every flagged corridor; raw smoothed-DTM elsewhere). Step thresholds:
+  every flagged corridor; raw smoothed-DTM elsewhere). Roads render as
+  solid lines; **sidewalks render as dashed lines** (same color ramp)
+  so they're visually distinguishable. The single "Street slopes"
+  checkbox toggles three layers as a group: `graph-debug-edges`
+  (roads, solid), `graph-debug-sidewalk-edges` (sidewalks, dashed),
+  and `graph-debug-nodes` (nodes). Step thresholds:
   0–1% gray, 1–3% light green, 3–6% yellow, 6–10% orange, 10–15% red,
   15–20% dark red, 20%+ dark purple. Seattle's steepest real street is
   ~26%, so anything purple is either a sustained real climb (e.g.
@@ -896,7 +964,8 @@ In the "Routing debug" fieldset:
   `4 = isBridge`, `8 = isTunnel`,
   `16 = isCovered`, `32 = isIndoor`,
   `64 = isUntaggedCrossing`, `128 = isApproach`,
-  `256 = isEmbankment`, `512 = isCutting`.
+  `256 = isEmbankment`, `512 = isCutting`,
+  `1024 = isSidewalk`.
   Six OSM elevation-related flags (bridge / tunnel / covered / indoor /
   embankment / cutting) are independent — same edge can have multiple
   set. Bridge / tunnel are "DTM is structurally wrong here" flags
@@ -1128,26 +1197,47 @@ inconsistency this primitive was created to remove.
 - **Bottom sheet** (`#sheet`) — wraps `#left-stack`; on mobile,
   `position: fixed` filling the viewport and translated vertically by
   `src/sheet.js` to one of TWO snap points:
-  - **peek** (`min(200px, 28vh)`) — Start/End inputs + ride-style picker
-    visible. Endpoints always reachable.
-  - **full** (`92vh`) — scrollable full directions; map strip stays
-    visible up top (below the title bar).
+  - **peek** (static `PEEK_HEIGHT = 148 px` — drag handle + the
+    Directions input section as it's CSS-stable) — only the
+    "Directions" Start/End input section is visible. The riding-style
+    picker and Enable-sidewalks toggle are hidden in peek; user drags
+    up for full. Tune `PEEK_HEIGHT` in `sheet.js` if the section's
+    CSS height changes.
+  - **full** (`vh - FULL_TOP_OFFSET`, where `FULL_TOP_OFFSET = 44 px`)
+    — sheet top anchors at a fixed pixel offset from the viewport top
+    instead of `0.92 * vh`, so the visual top doesn't shift when the
+    iOS keyboard dismisses and `window.innerHeight` grows. Floored at
+    `PEEK_HEIGHT + 60` so full is always larger than peek on tiny
+    viewports.
+  - **Auto-snap to full on route compute** — `compute()` calls
+    `snapSheet('full')` after rendering (both on success and on
+    "no path found"), plus a follow-up rAF call to survive any
+    stray keyboard-dismiss resize that might re-apply a stale snap
+    state. Handles both "user typed/picked an address" (sheet stays
+    up) and "user finished Choose-on-map" (sheet was at peek during
+    the map tap, snaps back up so the user sees the directions
+    immediately).
   Sheet has its OWN white background + drop shadow + top-rounded
   corners; the drag pill lies on top of that sheet surface (not
   floating above a separate inner panel). Inner `#routing-panel` /
   `#directions-panel` are background-transparent on mobile so the
   sheet reads as a single component.
 - **Drag handle** (`#sheet-handle-bar`) — 40 × 4 px gray bar centered
-  at the top of the sheet (26 px-tall hit strip). Pointer events: drag
-  snaps to nearer of {peek, full} with velocity bias
-  (`|vy| > 0.5 px/ms` → snap in direction of motion); pure tap toggles
-  peek ↔ full. Inner-scroll guard: if `pointerdown` lands inside
-  `#left-stack` with `scrollTop > 0`, the sheet does NOT drag — body
-  scrolls natively. Critically, `sheet.js` sets
-  `scrollEl.style.maxHeight = snapPx[name] - HANDLE_HEIGHT` after every
-  snap so the inner scroll container is sized to the visible sheet
-  portion — without this, the last items of long step lists would sit
-  in the off-screen tail of the sheet and be unreachable.
+  at the top of the sheet (26 px-tall hit strip). **Pointer events
+  are bound to the pill ONLY** — taps on the sheet content (dropdown
+  rows, inputs, step list) are NOT sheet gestures. Drag snaps to
+  nearer of {peek, full} with velocity bias (`|vy| > 0.5 px/ms` →
+  snap in direction of motion); pure tap on the pill toggles peek ↔
+  full. (The pill-only restriction is the fix for the regression
+  where tapping a dropdown row registered as a sheet pointer-down +
+  pointer-up "no move → toggle" → e.g. tapping "Choose on map"
+  snapped the sheet to full immediately after `beginChooseOnMap`'s
+  `snapSheet('peek')`.) Inner scrolling of `#left-stack` works
+  natively without any guard. `sheet.js` still sets
+  `scrollEl.style.maxHeight = snapPx[name] - HANDLE_HEIGHT` after
+  every snap so the inner scroll container is sized to the visible
+  sheet portion — without this, the last items of long step lists
+  would sit in the off-screen tail of the sheet and be unreachable.
 - **Layers icon** (`#layers-fab`) lives inside the title bar next to
   the settings gear on BOTH desktop and mobile. Both buttons share the
   `#open-settings, #layers-fab` rule for matching chrome styling (28 ×
@@ -1225,9 +1315,21 @@ trivial resize events.
 
 Other details worth knowing for these SVGs:
 
-- The infra bar's viewBox **height** collapses when only one side has
-  labels (e.g. all-AAA → no bottom labels → drop the 36 px bot zone →
-  VB_H goes 82 → 50). See `infraSummaryBarSvg` for the layout.
+- The infra bar runs **a single row per side** at fixed y zones (top
+  zone 32 px, bottom zone 36 px, plus a 14 px bar). Labels are
+  x-placed with symmetric repulsion relaxation (each overlapping pair
+  pushes both members by half the overlap, then both clamp to
+  viewBox; iterate till stable). Connector horizontal-segment y
+  values are then assigned by **exhaustive search**: each side has
+  up to ~5 labels and we try 5 discrete y levels per connector
+  (≤ 5⁵ = 3,125 evaluations), picking the assignment with the
+  fewest leg/horizontal crossings (vertical-leg × horizontal-line
+  intersections, plus same-y horizontal overlap), with total
+  perturbation-from-default as the tiebreaker. This handles the
+  case where two connectors are at different y values but their
+  L-shapes still cross — the search finds a swap that clears the
+  crossing if one exists. See `infraSummaryBarSvg` for the layout.
+  Sub-1% categories label as `<1%` rather than rounding to `0%`.
 - The elevation chart's inner `pad` is `{ l: 40, r: 22, t: 32, b: 16 }`.
   `pad.l = 40` is sized for the y-axis tick labels ("525 ft" ≈ 32 px
   at the 10 px tabular-nums tick font, anchored end-aligned at

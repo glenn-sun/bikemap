@@ -9,7 +9,8 @@
 // the caller can run several A* searches with different weight sets to
 // produce alternative routes without disturbing any global state.
 
-import { edgeCostFt, turnPenaltyFt, crossingPenaltyFt } from './cost.js';
+import { edgeCostFt, turnPenaltyFt, crossingPenaltyFt,
+         sidewalkCrossingPenaltyFt } from './cost.js';
 
 const FT_PER_METER = 3.28084;
 const R_M = 6371000.0;
@@ -201,6 +202,11 @@ export function findPath(weights, graph, startSpec, endSpec,
       const cross = crossingPenaltyFt(weights, graph, cur.node, cur.prevEdge, eid);
       if (!Number.isFinite(cross)) continue;
       stepCost += cross;
+      // Crosswalk-specific penalty: fires when stepping onto a sidewalk
+      // segment that 2D-crosses a road. Zeroed by the same signal/
+      // crosswalk/beacon/stop flags as `crossingPenaltyFt`.
+      const swCross = sidewalkCrossingPenaltyFt(weights, graph, cur.node, eid);
+      stepCost += swCross;
 
       const newG = cur.g + stepCost;
       if (newG >= (bestG.get(toNode) ?? Infinity)) continue;
