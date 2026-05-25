@@ -93,11 +93,9 @@ src/routing/       Client-side routing:
 public/data/       Snapshot GeoJSON (regenerable; see fetch_data.py)
 public/data/seattle_polygon.geojson   Seattle boundary from OSM (used for clipping)
 public/data/routing_graph.json        Routable graph + per-node/per-geom
-                                       elevation (~12 MB, see build_graph.py
-                                       then sample_dtm.py). Elevation is
-                                       temporary v3-prep wiring: smoothed
-                                       USGS 3DEP DTM + uniform-spacing
-                                       resample, no bridge correction yet.
+                                       elevation + heat-eq corrections
+                                       (~11 MB, see build_graph.py →
+                                       sample_dtm.py → resolve_elevation.py).
 public/data/contours.geojson          25-ft elevation contour lines
                                        (~1.7 MB; `index=1` flag for thicker
                                        every-100ft). Re-extracted from the
@@ -117,6 +115,18 @@ scripts/sample_dtm.py        Stream USGS 3DEP DTM via /vsicurl/. Denoise
                               Also extract 25-ft contours from the RAW
                               DTM → contours.geojson. Caches Seattle window
                               to dtm_cache/ (~32 MB, .gitignored).
+scripts/resolve_elevation.py Heat-equation elevation correction for
+                              every flagged-subgraph group with ≥1
+                              boundary node. Solves the discrete
+                              Dirichlet problem on the flagged-only
+                              adjacency with boundary elevations fixed
+                              at their (trustworthy) DTM values.
+                              Overwrites interior node elevations,
+                              linear-interps each flagged geom's
+                              per-vertex profile between the corrected
+                              endpoints, and recomputes per-edge
+                              uphillFt/maxUphillPct/steepFt2 analytically
+                              (linear profile → constant slope).
 scripts/build_addr_index.py  Overpass addr:housenumber + named POIs → public/data/addr_index.json
 scripts/make_basemap.sh      pmtiles extract for Seattle bbox
 
@@ -145,54 +155,34 @@ npm run dev    # http://localhost:5173
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install requests shapely numpy rasterio scipy scikit-image
-python3 scripts/fetch_data.py         # SDOT/KC layers → public/data/*.geojson
-python3 scripts/build_graph.py        # OSM (Overpass) + SDOT joins → routing_graph.json
-python3 scripts/sample_dtm.py         # smoothed DTM + resampling → nodes.elev[]/geomElevs[]/edge climb + contours.geojson
-python3 scripts/build_addr_index.py   # OSM addresses + named POIs → addr_index.json
+python3 scripts/fetch_data.py          # SDOT/KC layers → public/data/*.geojson
+python3 scripts/build_graph.py         # OSM (Overpass) + SDOT joins → routing_graph.json
+python3 scripts/sample_dtm.py          # smoothed DTM + resampling → nodes.elev[]/geomElevs[]/edge climb + contours.geojson
+python3 scripts/resolve_elevation.py   # heat-eq smoothing on flagged subgraph → rewrites nodes.elev/geomElevs + edge climb metrics
+python3 scripts/build_addr_index.py    # OSM addresses + named POIs → addr_index.json
 ```
 `build_graph.py` reads the GeoJSONs `fetch_data.py` writes, so run them
 in order. `sample_dtm.py` reads the graph that `build_graph.py` writes
 and updates elevation in place — re-run it whenever the graph rebuilds.
-`build_addr_index.py` is independent of the two graph scripts but reads
+`resolve_elevation.py` reads what `sample_dtm.py` wrote and again
+overwrites in place — re-run it any time the elevation data changes,
+because sample_dtm will wipe the heat-eq corrections otherwise.
+`build_addr_index.py` is independent of the graph scripts but reads
 `seattle_polygon.geojson` (`fetch_data.py` creates it). Overpass queries
 are bbox-only; full Seattle pulls take 30–90 s each (the fetch is
 retried across 4 mirror endpoints because overpass-api.de often
-504s). Output sizes: routing_graph ~12 MB, contours ~1.7 MB, addr_index
+504s). Output sizes: routing_graph ~11 MB, contours ~1.7 MB, addr_index
 ~19 MB.
 
-**Elevation status (TEMPORARY v3-prep wiring).** `sample_dtm.py`
-populates the full elevation schema from USGS 3DEP DTM with light
-raster denoising AND uniform-spacing profile resampling — both passes
-flow through to *both* the routing-cost metrics and the
-directions-panel chart, so all consumers see the same smoothed view:
-  - In-memory raster is denoised with **5×5 median + σ=2 px Gaussian**
-    (see `smooth_raster` in `sample_dtm.py`) BEFORE node/geom sampling.
-    Contour extraction still runs against the **raw** DTM, so the
-    topographic-line layer is unchanged.
-  - Each geom's per-vertex profile is then **resampled to uniform
-    sub-segments of ~75 ft** (`COST_RESAMPLE_FT`, with `n = max(1,
-    round(arc_length / 75 ft))` breakpoints), eliminating
-    OSM-vertex-spacing artifacts where one short "catch-up" segment
-    shows a catastrophic slope. The resampled breakpoint profile is
-    then linear-interped back to the original OSM vertex positions,
-    so `geomElevs[gi]` keeps its per-vertex shape while reflecting the
-    smoothed curve.
-  - `nodes.elev[]`  — bilinear smoothed-DTM at each routing-graph node
-  - `geomElevs[]`   — back-interpolated resampled profile, one elev per
-    OSM vertex (~163 K samples). Consumed by `graph.edgeElevProfile()`,
-    which feeds the directions-panel chart, `climbStats` (steepest
-    uphill %), and the chart-hover cursor.
-  - `edges.uphillFt[]`, `edges.maxUphillPct[]`, `edges.steepFt2[]`
-    — per-directed-edge climb metrics computed from the uniform-spacing
-    breakpoint profile directly (skipping the back-interp step for
-    precision). Same underlying resampled curve as `geomElevs[]`, so
-    chart-displayed steepness matches routing-cost view.
-This activates the elevation terms in `cost.js` and lights up the
-directions-panel elevation chart. **Bridges are still wrong** — neither
-the raster filter nor the resampling fixes the systematic "DTM reads
-water under the deck" error. v3 must add explicit bridge/tunnel/
-untagged-crossing handling on top. See "Elevation pipeline (deprecated,
-awaiting v3)" below for the post-resampling noise profile.
+**Elevation overview.** Two-stage offline pipeline writes the
+elevation fields consumed by `cost.js`, the directions-panel chart,
+`climbStats`, and the Street Slopes debug overlay. Stage 1
+(`sample_dtm.py`) bilinear-samples a smoothed + uniform-resampled
+USGS 3DEP DTM. Stage 2 (`resolve_elevation.py`) applies heat-equation
+correction over every flagged-subgraph group connected to the
+routable network — fixing the systematic "DTM reads water under
+the bridge deck" errors. See the "Elevation pipeline" section below
+for details, schema, and lessons.
 
 **Refresh basemap**:
 ```bash
@@ -479,7 +469,8 @@ Client-side bike comfort routing on a precomputed graph. Two halves:
 
 1. **Offline build** (`scripts/build_graph.py`) — Overpass for OSM
    topology, SDOT spatial joins for attributes. Avoids osmnx/GDAL.
-   Writes `public/data/routing_graph.json` (~8.5 MB).
+   Writes `public/data/routing_graph.json` (~11 MB after the
+   sample_dtm + resolve_elevation passes).
 2. **Browser** (`src/routing/`, `src/search/`) — A\* with the comfort cost
    function, address/POI search, click-to-route UI, turn-by-turn directions,
    tabbed alternates.
@@ -556,9 +547,28 @@ H. **Expand to directed edges**: `forward` / `reverse` / `bidir`.
    `streetName` (OSM `name` only). Carry the OSM elevation-related tags
    into the directed-edge record: `isBridge`, `isTunnel`, `isCovered`,
    `isIndoor`, and integer `layer` (parsed from `layer=*`).
-I. **Serialize columnar**: parallel arrays per attribute; geometry deduped
+I. **Detect untagged 2D crossings** — way-segments that geometrically
+   intersect another way without sharing an OSM node. Sets bit 64; the
+   data-quality flag for "v3 can't place either edge in 3D".
+J. **Detect approach edges** — multi-source Dijkstra from every tagged
+   (bridge / tunnel / layered / covered / indoor / embankment / cutting)
+   edge endpoint, max graph-walk 200 ft. Returns two buckets: edges
+   with BOTH endpoints in range (fully inside), and edges that straddle
+   the 200 ft isoline (close endpoint in, far endpoint out).
+J.1 **Cut straddling approaches at the polyline isoline** — every
+    straddling directed edge is sliced at exactly `200 − d_close` ft
+    along its polyline from the close endpoint. A new interior node is
+    inserted at the cut; the close half inherits the approach flag,
+    the far half does not. Both directions of a way-segment cut at the
+    same arc-length so they share the new interior node. Slivers
+    (cut < 1 ft on either side) are special-cased: close-end sliver →
+    unflagged; far-end sliver → whole edge promoted to fully-flagged.
+    On the current Seattle snapshot: ~700 new interior nodes,
+    ~29 mi of approach surface trimmed, disentangles several merged
+    bridge-corridor groups.
+K. **Serialize columnar**: parallel arrays per attribute; geometry deduped
    (fwd/rev share index + `reversed` flag); strings interned. This
-   columnar form is what gets the file to 8.5 MB; per-record JSON-key
+   columnar form is what gets the file to ~9 MB; per-record JSON-key
    overhead would bloat it to 200+ MB. `graph.js` matches this shape.
 
 ### Cost function: presets, custom sliders, twists
@@ -857,55 +867,16 @@ In the "Routing debug" fieldset:
 - **Crosswalks** — yellow dots.
 - **Beacons** — purple dots (RFB + school).
 - **Stop signs** — stop-sign-red dots (SDOT R1-1, with FACING attribute).
-- **Routing graph (slope)** — overlays every bike-routable edge colored
-  by absolute DTM slope, with each node as a small dark-pink circle.
-  Edges deduped by `geomIndex`; slope = `(elev_to − elev_from) / lengthFt`
-  computed in the UI from `nodes.elev[]`. Step thresholds: 0–1% gray,
-  1–3% light green, 3–6% yellow, 6–10% orange, 10–15% red, 15–20% dark
-  red, 20%+ dark purple. (Seattle's steepest real street is ~26%, so
-  anything purple is either a sustained climb like Marshall Park or a
-  DTM artifact — the chief example being bridge edges where DTM reads
-  the water surface under the deck.)
-- **OSM elevation tags** — same edge source, colored by OSM categorical
-  tag with a fixed priority (first match wins):
-    1. `untagged-crossing` (hot pink `#ec407a`) — derived data-quality
-       flag; see bitfield reference below
-    2. `bridge` (red `#d32f2f`)
-    3. `tunnel` (blue `#1565c0`)
-    4. `layered` (purple `#8e24aa`) — `layer=±N` but no bridge/tunnel tag
-    5. `embankment` (brown `#6d4c41`) — raised earthwork; DTM is correct
-    6. `cutting` (slate `#455a64`) — sub-grade cut; DTM is correct
-    7. `covered` (amber `#f9a825`)
-    8. `indoor` (teal `#00897b`)
-    9. `approach-of-{bridge,tunnel,layered,embankment,cutting,covered,indoor}`
-       — faded version of the source color (`#ffcdd2` / `#bbdefb` /
-       `#d1c4e9` / `#d7ccc8` / `#cfd8dc` / `#fff9c4` / `#b2dfdb`).
-       Untagged edges within ~200 ft graph-walk of a tagged edge —
-       likely the un-tagged approach ramp to a tagged structure.
-   10. default (gray `#9e9e9e`)
-  Counts on the current Seattle snapshot (per unique geometry; one geom
-  = one edge pair):
-    - 351 bridge, 31 tunnel, 30 covered, 22 embankment, 13 cutting,
-      0 indoor
-    - 410 with `layer=*` set (340 of those overlap with bridge, 16 with
-      tunnel; the remaining 46 are "layered" but untagged-structure)
-    - layer distribution: +1 = 355, −1 = 25, +2 = 14, +3 = 9, −2 = 5, +4 = 2
-    - 1 anomalous `bridge=yes tunnel=yes` edge (likely OSM mistag —
-      worth surfacing if you spot it on the map)
-    - 134 `untagged-crossing` edges from 192 crossing pairs (10 pairs
-      both-untagged = true ambiguity; 182 pairs with one side tagged =
-      OSM-canonical but worth eyeballing for tagging gaps)
-    - **1,506 unique-geometry approaches** (≈ 2,627 directed-edges):
-      1,017 of bridge, 187 of layered, 118 of tunnel, 106 of covered,
-      56 of embankment, 22 of cutting. Zero indoor.
-  Useful for v3 planning: bridge / tunnel / non-zero `layer` edges are
-  where raw DTM is structurally wrong; embankment / cutting are real
-  terrain — DTM is right, don't apply bridge-style fix logic to them;
-  covered edges only matter for DSM-style rasters; `untagged-crossing`
-  highlights ambiguous geometry that may need OSM tagging fixes;
-  **approach edges are the wider correction surface v3 should apply the
-  same "interpolate between trustworthy endpoints" fix to**, since OSM
-  frequently tags the bridge span but not the ramp.
+- **Street slopes** — overlays every bike-routable edge colored by
+  absolute slope, with each node as a small dark-pink circle. Edges
+  deduped by `geomIndex`; slope = `(elev_to − elev_from) / lengthFt`
+  computed in the UI from `nodes.elev[]` (which is heat-eq-corrected on
+  every flagged corridor; raw smoothed-DTM elsewhere). Step thresholds:
+  0–1% gray, 1–3% light green, 3–6% yellow, 6–10% orange, 10–15% red,
+  15–20% dark red, 20%+ dark purple. Seattle's steepest real street is
+  ~26%, so anything purple is either a sustained real climb (e.g.
+  Marshall Park) or a residual artifact at a multi-level junction where
+  heat eq smoothed across grade.
 
 ### Known caveats
 
@@ -939,7 +910,14 @@ In the "Routing debug" fieldset:
   no elevation tag of its own; `isApproach` is set by
   `detect_approach_edges` on every untagged edge within ~200 ft
   graph-walk distance of any tagged edge (now including embankment
-  and cutting sources). The nearest source category is recorded in the
+  and cutting sources). The 200 ft is enforced as a polyline cutoff:
+  edges straddling the isoline are split by `apply_approach_splits`
+  at the precise 200 ft point, with a fresh interior node inserted at
+  the cut; the close half is flagged, the far half isn't. New interior
+  nodes get no signal / stop-sign / circle bits (those belong to OSM
+  endpoint nodes); they're degree-2 by construction and inherit
+  elevation by linear interp during `sample_dtm.py`. The nearest source
+  category is recorded in the
   parallel `edges.approachOf[]` string column — one of
   `bridge` / `tunnel` / `layered` / `embankment` / `cutting` /
   `covered` / `indoor`, null when not an approach; ties broken by
@@ -948,22 +926,20 @@ In the "Routing debug" fieldset:
   `edges.layer[]` signed-int column for OSM `layer=*` (null = unset).
   Nodes: see Step F.
 
-## Elevation pipeline (temporary v3-prep — bridges still wrong)
+## Elevation pipeline
 
-**Current state.** `sample_dtm.py` populates the full elevation schema
-from raw-then-smoothed USGS 3DEP DTM, then uniform-resamples each geom
-to 75-ft sub-segments before computing per-edge climb metrics. All
-elevation-consuming code paths (cost.js, the chart, `climbStats`, the
-debug overlay) see the same smoothed curve. The slider works; the chart
-renders real curves; the Flatter twist can differentiate routes.
-**Bridges are the elephant in the room** — neither raster smoothing nor
-arc-length resampling can fix systematic "DTM reads water under the
-deck" errors. v3's central job is to handle them. The graph has been
-annotated with everything v3 needs to drive that fix; the schema is
-already wired, so v3 can write into the same fields and have the entire
-app light up automatically.
+**Current state.** Two-stage pipeline: `sample_dtm.py` populates raw
+elevation from smoothed-and-resampled USGS 3DEP DTM, then
+`resolve_elevation.py` applies heat-equation correction over the
+flagged subgraph (every bridge / tunnel / layered / approach corridor
+that connects to the regular street network). All elevation-consuming
+code paths (`cost.js`, the directions-panel elevation chart,
+`climbStats`, the Street Slopes debug overlay) read from the final
+post-correction `nodes.elev[]` / `geomElevs[]`. The slider works; the
+chart renders real curves on every corridor including over-I-5
+downtown; the Flatter twist meaningfully differentiates routes.
 
-### Pipeline today (sample_dtm.py)
+### Stage 1: sample_dtm.py
 
 1. Stream USGS 3DEP tile `n48w123` via rasterio `/vsicurl/`; cache the
    Seattle window to `dtm_cache/seattle_window.npy` (~32 MB).
@@ -985,66 +961,84 @@ app light up automatically.
    `contours.geojson`. The topographic layer stays free of resampling
    artifacts.
 
-### What v3 actually has to add (the hard parts)
+### Flag annotations used by the elevation pipeline
 
-Bridges. Specifically, the systematic error where bare-earth DTM
-samples water/ground level *under* a bridge deck rather than the deck
-itself. The graph already has the surface annotated:
+The graph carries enough OSM tagging to drive the heat-eq correction.
+Counts on the current Seattle snapshot (per unique geometry):
 
-- `isBridge` (351 unique geoms): OSM-tagged bridge spans
-- `isTunnel` (31): OSM-tagged tunnels
-- `isUntaggedCrossing` (134): pairs of OSM ways that geometrically
-  cross without sharing a node and are both un-tagged for elevation —
-  the data-quality fix-targets
-- `isApproach` (1,506 unique geoms): every untagged edge within 200 ft
-  graph-walk distance of any tagged edge — captures the un-tagged ramps
-  that OSM convention leaves untagged. Source category recorded in
-  `edges.approachOf[]`.
-- `isEmbankment` (22) / `isCutting` (13): real earthworks — **DTM is
-  correct on these**, do NOT apply bridge-fix logic. They're seeded
-  into the approach BFS only to surface neighborhood context.
-- `edges.layer[]` signed int: OSM `layer=*` value, the cleanest "true"
-  elevation tag — positive = elevated, negative = below grade.
+- `isBridge` (351), `isTunnel` (31), `isCovered` (30), `isIndoor` (0)
+  — OSM elevation-related tags. DTM is structurally wrong on bridges
+  (reads water under deck) and tunnels (reads surface above floor).
+- `edges.layer[]` (410 with `layer=*`, distribution +1=355, −1=25,
+  +2=14, +3=9, −2=5, +4=2). The cleanest single elevation tag.
+- `isEmbankment` (22) / `isCutting` (13) — **real earthworks, DTM is
+  CORRECT here.** Don't apply bridge-style fix logic. They're seeded
+  into the approach BFS only for neighborhood context.
+- `isUntaggedCrossing` (~159 unique segs after splits, from 192
+  crossing pairs) — derived: this way-segment 2D-crosses another
+  without sharing a node and carries no elevation tag of its own.
+- `isApproach` (~1,457 unique segs after Step J.1 polyline cutoff;
+  697 new interior nodes inserted at the 200 ft isoline; ~29 mi of
+  polyline length trimmed vs the previous node-granularity rule) —
+  derived: an untagged edge whose polyline arc-length is within 200
+  ft graph-walk of any tagged source. Source category recorded in
+  `edges.approachOf[]` (one of bridge / tunnel / layered / embankment
+  / cutting / covered / indoor).
 
-### Starting points for v3 (suggestions)
+### Heat-eq correction (`scripts/resolve_elevation.py`)
 
-1. **Bridge endpoint reconstruction.** The wrong elevation at each
-   bridge node propagates into every edge that shares that node (the
-   one-node-one-elevation invariant). For each bridge endpoint, look
-   for a non-bridge neighbor with a "trustworthy" elevation (no flag set,
-   not an untagged-crossing, not an approach with `approachOf="bridge"`)
-   and replace the bridge endpoint's elevation with an interpolation
-   between trustworthy neighbors. Re-run per-edge climb metrics
-   afterward.
-2. **Apply the same fix to approach edges.** OSM frequently tags only
-   the bridge span; the actual elevation transition is on the ramps
-   beforehand. `isApproach` + `approachOf` gives v3 the correction
-   surface — same "interpolate between trustworthy endpoints" pattern,
-   but starting further out from the tagged span.
-3. **The "step at the end of a trail" pattern.** Some long flat trails
-   show a sustained climb concentrated at one endpoint (BGT at
-   Magnuson Park, etc.). The uniform resampling smooths the *reported*
-   slope, but the *underlying* node elevation at the trail-road
-   intersection is probably contaminated — the OSM node sits at the
-   road surface, not the trail surface beneath. This needs intersection-
-   aware logic: degree-≥3 node + trail-interior elevation that
-   contradicts the node's DTM reading → trust the trail-interior
-   extrapolation. Worth its own pass after bridge handling lands.
-4. **30% post-sample cap.** Seattle's steepest real street is 26% (owner-
-   verified). Anything above ~30% after v3's main work is residual
-   noise — clamp it. Cheap belt-and-suspenders.
-5. **Things explicitly NOT to do:**
-   - Don't apply bridge-fix logic to `isEmbankment` / `isCutting` —
-     those are real terrain, DTM is right.
-   - Don't pursue within-edge spike-pair detection (the v2 idea). I
-     audited the top-5 "spike artifact" candidates and all of them
-     were sustained multi-segment STEPS at one edge endpoint, not
-     isolated single-vertex spikes. Spike rejection wouldn't help.
-   - Don't re-sample raster at finer scale than `~50 m` — that's our
-     smoothing extent and the practical resolution limit at 10 m
-     cells. Anything finer is sampling noise.
+Solves a discrete Dirichlet problem on the flagged subgraph. A
+"group" is a connected component of flagged way-segments, connectivity
+by shared OSM nodes. For each group with ≥1 boundary node:
 
-### Schema (fixed — v3 must write these)
+- **Boundary nodes** = endpoints with ≥1 unflagged incident edge in
+  the full graph. Their DTM elevation is trustworthy (sitting at the
+  transition out of the flagged surface, or at the 200 ft polyline
+  isoline split node added by Step J.1).
+- **Interior nodes** = endpoints all of whose incident edges are
+  flagged (typically bridge spans deep inside a corridor).
+- Solve `min Σ_edges (e_u − e_v)² / L_{uv}` with boundary elevations
+  fixed. Linear system on interior unknowns, sparse SPD, dense numpy
+  solve since groups are small (max ~125 segs).
+- Apply: overwrite interior `nodes.elev[]`. For each flagged geom in
+  the group, replace `geomElevs[gi]` with linear interp between the
+  (now corrected) endpoint elevations. Recompute
+  `edges.uphillFt/maxUphillPct/steepFt2` analytically (linear profile
+  → constant slope).
+
+Coverage on the current snapshot: **264 of 277 groups solved**. The
+13 unsolved have no boundary nodes — isolated all-flagged "island"
+components disconnected from the routable network (pedestrian
+bridges between trail islands, etc.). 2,003 geoms rewritten / 3,277
+directed edges (~85% of the 3,594 v3-flagged directed edges).
+
+**Multi-level junctions remain a localized failure mode.** The heat
+eq runs on graph adjacency, not 2D geometry, so paths that 2D-cross
+without sharing an OSM node naturally stay at independent
+elevations. Where they DO share a node elsewhere in the same group
+(stairs / elevators / shared building entrances at Convention
+Place, freeway ramp merges, the Beacon Hill / I-90 complex), the
+solution collapses both paths in a small neighborhood. **Accepted
+tradeoff** — for bike routing, slope magnitudes matter, not
+absolute layer ordering.
+
+### Things explicitly NOT to do (elevation)
+
+- Don't apply bridge-fix logic to `isEmbankment` / `isCutting` —
+  those are real terrain, DTM is right.
+- Don't pursue within-edge spike-pair detection (the v2 idea).
+  Audited the top-5 "spike" candidates; all 5 were sustained multi-
+  segment STEPS at one edge endpoint, not isolated single-vertex
+  spikes. Spike rejection wouldn't help. Their underlying cause is
+  probably intersection-node elevation contamination.
+- Don't re-sample raster finer than `~50 m` — that's our smoothing
+  extent and the practical resolution limit at 10 m cells. Finer is
+  sampling noise.
+- Don't re-introduce DSM. First-return DSM reads bridge superstructure
+  tops correctly but also reads tree canopy over at-grade roads.
+  v1's hybrid wasn't enough; the heat-eq approach replaces it.
+
+### Schema written by the elevation pipeline
 
 | Field | Shape | Notes |
 |---|---|---|
@@ -1054,73 +1048,41 @@ itself. The graph already has the surface annotated:
 | `edges.maxUphillPct[]` | one float per directed edge, fraction | Inspection metric ONLY; **not** consumed by `cost.js`. |
 | `edges.steepFt2[]` | one float per directed edge | `Σ_seg(length · max(0, slope − 0.02)²)`. Consumed by `cost.js`. |
 
-Cost-function wiring in `src/routing/cost.js` (don't touch unless
-re-tuning):
+Cost-function wiring in `src/routing/cost.js`:
 - `uphillFtPenalty = 40 · s5` — linear per-foot uphill penalty
 - `steepCoeff = 400 · s5` — quadratic-on-slope steepness penalty
 - `STEEP_THRESHOLD = 0.02` in both `cost.js` and `sample_dtm.py` —
   keep them in sync if you change it
-- `Flatter` twist (`s5: +0.5`) is already defined; it'll start
-  meaningfully differentiating routes once v3 produces clean enough
-  elevation that A* sees real choices between alternates
+- `Flatter` twist (`s5: +0.5`) meaningfully differentiates routes
+  against the heat-eq-corrected elevations.
 
-### Noise profile after current pipeline
+### Elevation lessons (carry forward)
 
-Measured on 35,254 unique way-segments; `maxUphillPct` is the inspection metric.
-
-| Threshold | raw DTM | smoothed only | + 75-ft resample (now) |
-|---|---:|---:|---:|
-| > 10% slope | 2,142 | 2,143 | **1,727** |
-| > 15% | 793 | 734 | **495** |
-| > 20% | 301 | 252 | **112** |
-| > 26% (Seattle real max) | 133 | 52 | **20** |
-| > 35% | 57 | 2 | **2** |
-| > 50% | 19 | 0 | **0** |
-| max | 80.5% | 39.6% | **37.2%** |
-
-The two remaining >35% slopes are both known bridges (no raster filter
-can fix them). Of the 20 over-26% edges, ~75% are tagged or approach
-edges that v3's bridge logic should address. The remaining ~5 plain
-high-slope edges are genuinely steep real Seattle terrain (downtown
-Lenora at the Elliott Way embankment, Union Street, the Magnolia bluff,
-etc.) — verified by owner inspection.
-
-### Constraints learned the hard way (carry these into v3)
-
-- **Bridges are systematic errors, not noise.** Smoothing helps with
-  random raster noise; bridges are correctly-measured *wrong* terrain.
-  Need explicit per-edge handling that doesn't sample DTM at bridge
-  spans.
-- **DTM ≠ DSM.** Bare-earth DTM reads water/ground under bridges.
-  First-return DSM reads bridge superstructure tops AND tree canopy
-  over at-grade roads. Neither alone is right; v1's hybrid wasn't
-  enough either. Don't re-introduce DSM unless you have a clear plan
-  for the tree-canopy contamination.
-- **`maxUphillPct` is for human inspection, not for cost.** `cost.js`
-  reads `uphillFt` (total positive rise) and `steepFt2` (length-weighted
-  quadratic). Both are robust to OSM-vertex-spacing variation. So a
-  catastrophic-looking max slope on a long-flat-with-spike edge doesn't
-  necessarily mean the routing is being misled — but it does mislead
-  the debug overlay and the chart caption. Resampling fixed the
-  inspection metric; cost was already approximately right.
-- **"Spike artifacts" are usually steps.** Inspecting the top-5
-  apparent spike-artifact edges showed all 5 had the steep slope
-  spread monotonically across 3-6 consecutive sub-segments at one
-  edge endpoint — a sustained transition, not an isolated bad sample.
-  v2-style spike-pair detection wouldn't catch them. Their underlying
-  cause is probably intersection-node elevation contamination (see
-  "Starting points for v3", item 3).
-- **Real Seattle hills exist and shouldn't be "fixed".** A surprising
-  number of "plain" high-slope edges turned out to be genuinely steep
-  real streets (Lenora downtown, Union St downtown, parts of W
-  Commodore Way, multiple West Seattle hill blocks). Spot-check before
-  treating any high-slope edge as an artifact.
-- **Owner-verified slope ceiling: 26%** is the steepest real street in
-  Seattle. >30% in the final graph means residual noise (or genuine
-  bike-path / staircase, but those are rare).
-- **The 1 anomalous `bridge=yes tunnel=yes` edge** is probably an OSM
-  mistag — surface it visually and decide whether to fix in OSM
-  upstream or special-case it.
+- **Bridges are systematic errors, not noise.** Raster smoothing
+  doesn't help with bridges — they're correctly-measured *wrong*
+  terrain (DTM reads water under deck). The heat eq solves this
+  topologically by interpolating between trustworthy boundary nodes.
+- **DTM ≠ DSM.** First-return DSM reads bridge tops correctly but
+  also reads tree canopy over at-grade roads. Don't re-introduce it.
+- **`maxUphillPct` is for human inspection, not cost.** `cost.js`
+  reads `uphillFt` (total positive rise) and `steepFt2` (length-
+  weighted quadratic). Both are robust to OSM-vertex-spacing
+  variation. So a catastrophic-looking max slope on a long-flat-with-
+  spike edge doesn't necessarily mean the routing is being misled —
+  but it does mislead the debug overlay and the chart caption.
+- **"Spike artifacts" are usually multi-segment steps.** Don't bother
+  with single-vertex spike detection; the high-slope sub-segments
+  are typically 3-6 consecutive sub-segments at one edge endpoint
+  (intersection-node elevation contamination at trail-road
+  junctions).
+- **Real Seattle hills exist and shouldn't be "fixed".** Owner-
+  verified steepest real street is 26% (Lenora downtown / Union
+  St / W Commodore Way / various West Seattle blocks). >30% in the
+  final graph means residual noise (or genuine bike-path / staircase,
+  rare).
+- **Owner ground truth wins over indirect analysis.** When in doubt
+  about empirical claims, measure against parcels / permits / owner's
+  lived experience rather than data-density proxies.
 
 ## Mobile layout
 
@@ -1441,8 +1403,49 @@ Decisions worth remembering:
   connectivity), (b) sign-coverage is added POST-route so the displayed
   total differs from the A\* objective, or (c) the displayed route is a
   twist with perturbed weights rather than the primary.
-- **Elevation has its own section.** See "Elevation pipeline
-  (temporary v3-prep — bridges still wrong)" above for the full
-  current-state, schema, lessons, and v3-design starting points. The
-  short version: bridges remain the unsolved problem; smoothing +
-  resampling clean everything else.
+- **Elevation has its own section.** See "Elevation pipeline" above
+  for the full current-state, schema, and lessons. Short version:
+  smoothed + resampled USGS DTM → heat-eq correction over the
+  flagged subgraph (bridges, tunnels, layered, untagged crossings,
+  approaches within 200 ft polyline distance) → linear-interp'd geom
+  profiles + analytic climb metrics. Multi-level shared-node
+  junctions remain a localized failure mode; accepted because slopes
+  are still reasonable.
+- **BFS-style annotations over-count without a polyline cutoff.** A
+  node-granularity "within N ft graph-walk" BFS flags whole edges
+  whenever either endpoint is in range, so a 400-ft block edge with
+  one endpoint just inside the radius gets fully flagged. Splitting
+  the edge at the precise arc-length cutoff (inserting a degree-2
+  interior node at the isoline; flagging only the close half) gives
+  a much cleaner correction surface — ~700 new interior nodes added
+  for the 200 ft approach radius here, ~29 mi of polyline length
+  trimmed. The split is one extra pass after the BFS; it doesn't
+  require changing the BFS itself. See `apply_approach_splits` in
+  build_graph.py.
+- **The heat equation on graph adjacency is the right elevation
+  primitive.** For any "correction surface" of edges whose DTM
+  elevations are wrong, with boundary nodes at the surface's
+  transition to trustworthy territory: solve `min Σ_edges (e_u −
+  e_v)² / L_{uv}` with boundary fixed. Linear, SPD, cheap (dense
+  numpy on each group). The Dirichlet condition makes the
+  one-node-one-elevation invariant work out — interior nodes inherit
+  smooth interp from their boundary anchors. Crucially, this is
+  solved on graph adjacency NOT 2D geometry, so paths that 2D-cross
+  without a shared OSM node naturally stay at independent elevations.
+  Shared-node coupling at multi-level junctions IS a failure mode
+  (the solver collapses the two paths there), but it's local and
+  acceptable for slope-driven consumers.
+- **"What does the consumer need?" prunes the problem.** When the
+  consumer is a bike-routing cost function (slopes + elevation gain),
+  absolute layer ordering between physically-stacked paths doesn't
+  matter — only that each path's per-edge slope is reasonable. That
+  insight let us accept the heat-eq's failure mode at multi-level
+  junctions without engineering a fix. If a future consumer needs
+  absolute elevations (e.g., 3D rendering), revisit.
+- **Predict, then measure.** I predicted ~15% of hard-case internal
+  crossings would have heat-eq collapse (the "Case B" shared-node
+  failure mode); the real number was 76%. Multi-level structures
+  in real Seattle have much denser shared-node coupling than the
+  abstract case suggests. Don't pre-commit to a path based on
+  theoretical predictions when you can run the experiment in 5
+  minutes.

@@ -1015,8 +1015,17 @@ def detect_approach_edges(directed_edges, max_dist_ft=200.0):
     either is within range, this edge is an approach attributed to the
     closer endpoint's source (ties broken by APPROACH_PRIORITY).
 
-    Returns dict[edge_idx] -> category_string for edges flagged as
-    approaches (untagged sources only)."""
+    Returns (flagged_full, flagged_partial):
+      flagged_full    : dict[edge_idx] -> category_string. Both
+                        endpoints within max_dist_ft. No further
+                        action; the whole edge is approach.
+      flagged_partial : list[dict] of split instructions. Exactly one
+                        endpoint within range; the polyline crosses
+                        the 200 ft isoline somewhere along its length.
+                        Each dict carries `edge_idx`, `close_node`,
+                        `far_node`, `cut_ft` (arc-length from close
+                        endpoint at which to split), and `category`.
+                        Consumed by apply_approach_splits()."""
     import heapq
 
     # Build node -> list of (edge_idx, neighbor_node_id, length_ft).
@@ -1064,31 +1073,279 @@ def detect_approach_edges(directed_edges, max_dist_ft=200.0):
                 continue
             heapq.heappush(heap, (nd, pr, nb, cat))
 
-    # Classify each untagged edge by its nearer endpoint.
-    flagged = {}
+    # Classify each untagged edge.
+    flagged_full = {}
+    flagged_partial = []
     for i, e in enumerate(directed_edges):
         if _source_category(e) is not None:
             continue  # tagged → not an approach
-        cands = []
-        for n in (e["from"], e["to"]):
-            best = node_best.get(n)
-            if best is not None:
-                cands.append((best[0], APPROACH_PRIORITY[best[1]], best[1]))
-        if not cands:
+        fa, fb = e["from"], e["to"]
+        ba = node_best.get(fa)
+        bb = node_best.get(fb)
+        da = ba[0] if ba else float("inf")
+        db = bb[0] if bb else float("inf")
+        in_a = da <= max_dist_ft
+        in_b = db <= max_dist_ft
+        if not (in_a or in_b):
             continue
-        cands.sort()  # closest distance, then highest priority
-        flagged[i] = cands[0][2]
+        if in_a and in_b:
+            # Both endpoints in range — fully approach. Attribute to the
+            # closer endpoint (ties broken by APPROACH_PRIORITY).
+            cands = [(da, APPROACH_PRIORITY[ba[1]], ba[1]),
+                     (db, APPROACH_PRIORITY[bb[1]], bb[1])]
+            cands.sort()
+            flagged_full[i] = cands[0][2]
+        else:
+            # Exactly one endpoint in range — polyline crosses the
+            # isoline. Defer to apply_approach_splits.
+            if in_a:
+                close_node, far_node = fa, fb
+                d_close, cat = da, ba[1]
+            else:
+                close_node, far_node = fb, fa
+                d_close, cat = db, bb[1]
+            flagged_partial.append({
+                "edge_idx":   i,
+                "close_node": close_node,
+                "far_node":   far_node,
+                "cut_ft":     max_dist_ft - d_close,
+                "category":   cat,
+            })
 
     # Stats by source category.
     from collections import Counter
-    by_cat = Counter(flagged.values())
+    by_cat_full = Counter(flagged_full.values())
+    by_cat_part = Counter(p["category"] for p in flagged_partial)
+    n_total = len(flagged_full) + len(flagged_partial)
     print(f"    {n_tagged:,} tagged directed-edges seeded the search")
-    print(f"    {len(flagged):,} untagged directed-edges within {max_dist_ft:.0f} ft "
-          f"flagged as approaches")
+    print(f"    {n_total:,} untagged directed-edges within {max_dist_ft:.0f} ft "
+          f"of a tagged source")
+    print(f"      fully inside (both endpoints):   {len(flagged_full):,}")
+    print(f"      partial (will be split by Step J.1): {len(flagged_partial):,}")
     for cat in ("bridge", "tunnel", "layered", "embankment", "cutting", "covered", "indoor"):
-        if by_cat.get(cat):
-            print(f"      approach-of-{cat:<11} {by_cat[cat]:>5,}")
-    return flagged
+        full = by_cat_full.get(cat, 0)
+        part = by_cat_part.get(cat, 0)
+        if full or part:
+            print(f"      approach-of-{cat:<11} {full:>5,} full  {part:>5,} partial")
+    return flagged_full, flagged_partial
+
+
+def _interpolate_polyline(coords, target_ft):
+    """Walk `coords` (list of [lon, lat]) summing arc length until reaching
+    `target_ft`. Return (cut_lon, cut_lat, vidx_before) where vidx_before
+    is the index of the last vertex BEFORE the cut point (so the close
+    half is coords[:vidx_before+1] + [cut_point]). If target_ft is at or
+    beyond the polyline length, returns the last vertex."""
+    acc = 0.0
+    for i in range(len(coords) - 1):
+        seg_len = haversine_ft(coords[i], coords[i+1])
+        if acc + seg_len >= target_ft:
+            t = (target_ft - acc) / seg_len if seg_len > 0 else 0.0
+            lon = coords[i][0] + t * (coords[i+1][0] - coords[i][0])
+            lat = coords[i][1] + t * (coords[i+1][1] - coords[i][1])
+            return (lon, lat, i)
+        acc += seg_len
+    return (coords[-1][0], coords[-1][1], len(coords) - 2)
+
+
+def apply_approach_splits(nodes, directed_edges, flagged_full,
+                           flagged_partial, untagged_crossings,
+                           min_cut_ft=1.0):
+    """Replace each partial-approach directed edge with two halves that
+    meet at a NEW interior node, placed at exactly `cut_ft` arc-length
+    from the close endpoint. The close half inherits the approach flag;
+    the far half does not.
+
+    The split is applied to ALL directed edges of the same way-segment
+    (fwd + rev for bidirectional ways), at the same arc-length point,
+    so both directions share the new interior node.
+
+    Side effects:
+      - `nodes` (dict[node_id] -> (lon, lat)) gains one new entry per
+        split way-segment.
+      - Returns (new_directed_edges, new_flagged_full, new_untagged_crossings)
+        with indices renumbered to the rebuilt edge list.
+
+    Skipped (treated as unflagged) when cut_ft < min_cut_ft — the close
+    endpoint is already essentially at the isoline; producing a sub-foot
+    sliver isn't worth the extra node.
+    """
+    from collections import defaultdict
+
+    # Group partials by way-segment (unordered endpoint pair). fwd and
+    # rev directed edges of the same segment agree on close_node and
+    # cut_ft by construction (the Dijkstra is undirected).
+    seg_to_partial = defaultdict(list)
+    for p in flagged_partial:
+        e = directed_edges[p["edge_idx"]]
+        key = frozenset((e["from"], e["to"]))
+        seg_to_partial[key].append(p)
+
+    # Reverse index: way-segment → list of directed-edge indices.
+    seg_to_edges = defaultdict(list)
+    for i, e in enumerate(directed_edges):
+        seg_to_edges[frozenset((e["from"], e["to"]))].append(i)
+
+    # Compute one cut point per way-segment; allocate new node IDs.
+    # New IDs sit above OSM's int64 range to avoid collisions
+    # (OSM IDs are non-negative int64; we use a high constant offset).
+    NEW_NODE_BASE = 10**15
+    new_node_counter = 0
+    seg_cut = {}      # key -> dict with cut info
+    seg_skip = set()  # close end at isoline (treat edge as unflagged)
+    forced_full = {}  # edge_idx -> category (whole edge inside 200 ft modulo a sliver)
+
+    for key, partials in seg_to_partial.items():
+        close_node = partials[0]["close_node"]
+        cut_ft     = partials[0]["cut_ft"]
+        cat        = partials[0]["category"]
+        # Sanity: directions of the same segment should agree.
+        for q in partials[1:]:
+            assert q["close_node"] == close_node, \
+                f"split-direction disagreement on {sorted(key)}"
+        L = directed_edges[seg_to_edges[key][0]]["lengthFt"]
+        if cut_ft < min_cut_ft:
+            # Close endpoint essentially at the isoline. Don't flag.
+            seg_skip.add(key)
+            continue
+        if L - cut_ft < min_cut_ft:
+            # Far endpoint barely past 200 ft. Treat the whole edge as
+            # fully flagged instead of producing a sliver far half.
+            for i in seg_to_edges[key]:
+                forced_full[i] = cat
+            seg_skip.add(key)
+            continue
+
+        # Pick a directed edge of this segment whose geometry begins at
+        # close_node (so arc-length cut_ft is measured from coords[0]).
+        sample_i = next((i for i in seg_to_edges[key]
+                         if directed_edges[i]["from"] == close_node), None)
+        if sample_i is not None:
+            coords = directed_edges[sample_i]["geometry"]
+        else:
+            # Only the reverse direction exists (one-way going far→close).
+            # Reverse its geometry to get close→far for the interpolation.
+            sample_i = seg_to_edges[key][0]
+            coords = list(reversed(directed_edges[sample_i]["geometry"]))
+
+        cut_lon, cut_lat, _ = _interpolate_polyline(coords, cut_ft)
+
+        new_id = NEW_NODE_BASE + new_node_counter
+        new_node_counter += 1
+        nodes[new_id] = (cut_lon, cut_lat)
+        seg_cut[key] = {
+            "new_node":   new_id,
+            "cut_lon":    cut_lon,
+            "cut_lat":    cut_lat,
+            "close_node": close_node,
+            "cut_ft":     cut_ft,
+            "category":   cat,
+        }
+
+    # Rebuild directed_edges. Edges in `seg_cut` get split; others copy.
+    new_directed = []
+    new_flagged_full = {}
+    new_untagged = set()
+    n_splits = 0
+    total_trim_ft = 0.0
+
+    for old_idx, e in enumerate(directed_edges):
+        key = frozenset((e["from"], e["to"]))
+        if key not in seg_cut:
+            new_idx = len(new_directed)
+            new_directed.append(e)
+            if old_idx in flagged_full:
+                new_flagged_full[new_idx] = flagged_full[old_idx]
+            elif old_idx in forced_full:
+                new_flagged_full[new_idx] = forced_full[old_idx]
+            if old_idx in untagged_crossings:
+                new_untagged.add(new_idx)
+            continue
+
+        info = seg_cut[key]
+        close_node = info["close_node"]
+        cut_ft     = info["cut_ft"]
+        new_node   = info["new_node"]
+        cat        = info["category"]
+
+        # Cut point in THIS direction's polyline arc length.
+        if e["from"] == close_node:
+            target = cut_ft
+        else:
+            target = e["lengthFt"] - cut_ft
+        cut_lon, cut_lat, vidx_before = _interpolate_polyline(e["geometry"], target)
+
+        # Build half geometries. Drop the inserted point if it coincides
+        # exactly with the preceding vertex (avoid a zero-length sliver
+        # leg inside the polyline).
+        head = e["geometry"][:vidx_before+1]
+        tail = e["geometry"][vidx_before+1:]
+        cut_pt = [round(cut_lon, 6), round(cut_lat, 6)]
+        if head and head[-1] == cut_pt:
+            half1_coords = list(head)
+        else:
+            half1_coords = head + [cut_pt]
+        if tail and tail[0] == cut_pt:
+            half2_coords = list(tail)
+        else:
+            half2_coords = [cut_pt] + tail
+
+        half1_len = target
+        half2_len = e["lengthFt"] - target
+
+        def make_half(from_node, to_node, coords, length):
+            new_e = dict(e)
+            new_e["from"] = from_node
+            new_e["to"]   = to_node
+            new_e["geometry"] = coords
+            new_e["lengthFt"] = round(length, 1)
+            new_e["bearingStart"] = round(initial_bearing(coords[0], coords[1]), 1)
+            new_e["bearingEnd"]   = round(initial_bearing(coords[-2], coords[-1]), 1)
+            return new_e
+
+        half1 = make_half(e["from"], new_node, half1_coords, half1_len)
+        half2 = make_half(new_node, e["to"],   half2_coords, half2_len)
+
+        idx1 = len(new_directed); new_directed.append(half1)
+        idx2 = len(new_directed); new_directed.append(half2)
+        n_splits += 1
+        # Trim accounting: half1_len if from=close else half2_len is the
+        # close half; the OTHER half is what we trimmed from the approach.
+        total_trim_ft += (half2_len if e["from"] == close_node else half1_len)
+
+        # The close half is the one whose `to` is the new node when from=close,
+        # or whose `from` is the new node when from=far.
+        if e["from"] == close_node:
+            close_half_idx = idx1
+        else:
+            close_half_idx = idx2
+        new_flagged_full[close_half_idx] = cat
+
+        # Untagged-crossing is a data-quality marker keyed by geometry;
+        # preserve it on both halves (the crossing event sits in one of
+        # them but we don't recompute here).
+        if old_idx in untagged_crossings:
+            new_untagged.add(idx1)
+            new_untagged.add(idx2)
+
+    # Edges skipped because the cut would produce a sub-foot sliver on
+    # one side. seg_skip union: (a) close end at isoline → unflagged, or
+    # (b) far end barely past isoline → forced_full (whole edge flagged).
+    if seg_skip:
+        print(f"    {len(seg_skip):,} way-segment(s) skipped "
+              f"(would produce <{min_cut_ft:.1f}-ft sliver)")
+        if forced_full:
+            print(f"      {len(forced_full):,} directed edges promoted to "
+                  f"fully-flagged (far sliver case)")
+
+    print(f"    split {n_splits:,} directed edges at the 200 ft isoline")
+    print(f"    new interior nodes added: {new_node_counter:,}")
+    # total_trim_ft accumulated trims from each directed edge; for a
+    # bidirectional segment we counted each half-edge once on fwd and
+    # once on rev, so divide by 2 to report a polyline-length figure.
+    print(f"    polyline length trimmed from approach surface: "
+          f"~{total_trim_ft/2/5280:.2f} mi")
+    return new_directed, new_flagged_full, new_untagged
 
 
 def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
@@ -1334,7 +1591,12 @@ def main():
     untagged_crossings = detect_untagged_crossings(directed)
 
     print("Step J: flag approach edges (graph-walk ≤ 200 ft from tagged)...")
-    approach_edges = detect_approach_edges(directed, max_dist_ft=200.0)
+    approach_full, approach_partial = detect_approach_edges(
+        directed, max_dist_ft=200.0)
+
+    print("Step J.1: split partial approach edges at the 200 ft isoline...")
+    directed, approach_edges, untagged_crossings = apply_approach_splits(
+        nodes, directed, approach_full, approach_partial, untagged_crossings)
 
     print("Step K: renumber and serialize...")
     renumber_and_serialize(nodes, directed, control_flags, is_circle,

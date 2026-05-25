@@ -163,7 +163,6 @@ function wireToggles(map) {
   // missing layers silently, and we'll call vm.apply() again once the
   // layers actually exist.
   vm.group('graph-debug',          ['graph-debug-edges', 'graph-debug-nodes']);
-  vm.group('graph-osm-tags-debug', ['graph-osm-tags-debug']);
 
   vm.bindCheckbox('aaa',         'toggle-aaa',         persisted)
     .bindCheckbox('bbl',         'toggle-bbl',         persisted)
@@ -182,7 +181,6 @@ function wireToggles(map) {
     .bindCheckbox('beacons-debug',    'toggle-beacons-debug',    persisted)
     .bindCheckbox('stop-signs-debug', 'toggle-stop-signs-debug', persisted)
     .bindCheckbox('graph-debug',          'toggle-graph-debug',          persisted)
-    .bindCheckbox('graph-osm-tags-debug', 'toggle-graph-osm-tags-debug', persisted)
     .onChange((snap) => {
       try { localStorage.setItem(LS_TOGGLES, JSON.stringify(snap)); } catch {}
     })

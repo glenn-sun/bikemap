@@ -70,7 +70,6 @@ const DEBUG_TOGGLE_IDS = [
   'toggle-beacons-debug',
   'toggle-stop-signs-debug',
   'toggle-graph-debug',
-  'toggle-graph-osm-tags-debug',
 ];
 
 // Route is rendered in pink — opposite green on the color wheel so AAA /
@@ -1721,14 +1720,17 @@ function saveSpeedToStorage(mph) {
 // share one feature) and every node as a small circle. Useful for spotting
 // snap targets, isolated trail islands, and edge-coverage gaps.
 //
-// Two layers share one edge source:
-//   - graph-debug-edges     colored by absolute DTM slope (DTM sampled
-//                           at edge endpoints; |Δelev| / lengthFt, signed
-//                           value also stored as `slopePct` for inspection)
-//   - graph-osm-tags-debug  colored by OSM elevation-related tag
-//                           (bridge / tunnel / default)
-// Both are added lazily (after the graph loads); visibility is driven by
-// the VisibilityManager bindings in main.js.
+// Two layers share one edge source — both rendered only when the
+// Street Slopes checkbox is on (VisibilityManager group 'graph-debug'
+// in main.js):
+//   - graph-debug-edges  colored by absolute slope. Slope comes from the
+//                        resolved node elevations on each edge
+//                        endpoint, so it reflects the heat-eq-corrected
+//                        view on every flagged corridor and the raw
+//                        smoothed-DTM view elsewhere.
+//   - graph-debug-nodes  small dark-pink dots at every routing-graph
+//                        node, for spotting topology issues alongside
+//                        the slope edges.
 
 function addGraphDebugLayers(map, graph) {
   // Walk all directed edges, dedupe by geomIndex, prefer the forward edge
@@ -1747,45 +1749,14 @@ function addGraphDebugLayers(map, graph) {
   const edgeFeatures = [];
   for (const [gIdx, edgeId] of geomToEdgeId) {
     const lenFt = graph.edgeLengthFt(edgeId);
-    const fromId = graph.edgeFrom(edgeId);
-    const toId   = graph.edgeTo(edgeId);
-    const fromElev = graph.nodeElev(fromId);
-    const toElev   = graph.nodeElev(toId);
-    // Signed slope in percent, going from geom-start to geom-end.
-    // Note: with all node elevations = 0, this is just 0 until a v3
-    // pipeline writes real data — but the layer is wired to it now so it
-    // lights up automatically once data lands.
-    const slopePct = lenFt > 0
-      ? ((toElev - fromElev) / lenFt) * 100
-      : 0;
-    // Classify by OSM elevation-related tag with a fixed priority. By
-    // construction `untagged-crossing` and `approach` only fire on
-    // edges with no other elevation tag; the ordering below is mostly
-    // documentary — first match wins. `untagged-crossing` outranks
-    // `approach` because it signals an OSM tagging gap (data quality
-    // issue) rather than expected structure proximity.
-    const layer = graph.edgeLayer(edgeId);
-    let osmTag;
-    if (graph.edgeIsUntaggedCrossing(edgeId))      osmTag = 'untagged-crossing';
-    else if (graph.edgeIsBridge(edgeId))           osmTag = 'bridge';
-    else if (graph.edgeIsTunnel(edgeId))           osmTag = 'tunnel';
-    else if (layer != null && layer !== 0)         osmTag = 'layered';
-    else if (graph.edgeIsEmbankment(edgeId))       osmTag = 'embankment';
-    else if (graph.edgeIsCutting(edgeId))          osmTag = 'cutting';
-    else if (graph.edgeIsCovered(edgeId))          osmTag = 'covered';
-    else if (graph.edgeIsIndoor(edgeId))           osmTag = 'indoor';
-    else if (graph.edgeIsApproach(edgeId)) {
-      const src = graph.edgeApproachOf(edgeId) || 'bridge';
-      osmTag = `approach-of-${src}`;
-    } else                                          osmTag = 'default';
+    const fromElev = graph.nodeElev(graph.edgeFrom(edgeId));
+    const toElev   = graph.nodeElev(graph.edgeTo(edgeId));
+    // Signed slope in percent, geom-start to geom-end.
+    const slopePct = lenFt > 0 ? ((toElev - fromElev) / lenFt) * 100 : 0;
     edgeFeatures.push({
       type: 'Feature',
       geometry: { type: 'LineString', coordinates: graph.geoms[gIdx] },
-      properties: {
-        slopePct: Math.round(slopePct * 100) / 100,
-        osmTag,
-        layer: layer ?? 0,
-      },
+      properties: { slopePct: Math.round(slopePct * 100) / 100 },
     });
   }
 
@@ -1803,9 +1774,9 @@ function addGraphDebugLayers(map, graph) {
     data: { type: 'FeatureCollection', features: edgeFeatures },
   });
   // Color steps by |slopePct| in percent. Calibrated against Seattle's
-  // 26% steepest-real-street ceiling: ≥20% is "off-the-chart" purple.
-  // Cycling-comfort thresholds: ≤3% gentle, 3-6% moderate, 6-10% hilly,
-  // 10%+ steep. When elevation is all zero, every edge is gray.
+  // 26% steepest-real-street ceiling: ≥20% is "off-the-chart" purple,
+  // either a sustained real climb or a residual artifact at a hard-case
+  // multi-level junction where the heat eq smoothed across grade.
   map.addLayer({
     id: 'graph-debug-edges',
     type: 'line',
@@ -1824,8 +1795,6 @@ function addGraphDebugLayers(map, graph) {
       'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 2.0],
       'line-opacity': 0.85,
     },
-    // Initial visibility 'none' — the VisibilityManager flips it based on
-    // the persisted checkbox state in the next apply() call.
     layout: { visibility: 'none' },
   });
   map.addSource('graph-debug-nodes', {
@@ -1841,47 +1810,6 @@ function addGraphDebugLayers(map, graph) {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 3],
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 0.5,
-    },
-    layout: { visibility: 'none' },
-  });
-
-  // Sibling layer over the same edge source: paint edges by OSM elevation-
-  // related categorical tag. Useful for v3 planning — these are the spans
-  // where a raw DTM sample is most likely to be wrong, plus a derived
-  // "untagged-crossing" data-quality flag for ambiguous geometry.
-  map.addLayer({
-    id: 'graph-osm-tags-debug',
-    type: 'line',
-    source: 'graph-debug-edges',
-    paint: {
-      'line-color': [
-        'match', ['get', 'osmTag'],
-        // hot pink — derived data-quality flag: this edge 2D-crosses
-        // another way-segment (no shared node) but carries no elevation
-        // tag of its own. The other way may or may not be tagged.
-        'untagged-crossing', '#ec407a',
-        'bridge',            '#d32f2f',   // red    — elevated, DTM unreliable
-        'tunnel',            '#1565c0',   // blue   — buried, DTM samples surface above
-        'layered',           '#8e24aa',   // purple — OSM layer=±N, no bridge/tunnel tag
-        'embankment',        '#6d4c41',   // brown  — raised earthwork; DTM is correct
-        'cutting',           '#455a64',   // slate  — sub-grade cut; DTM is correct
-        'covered',           '#f9a825',   // amber  — sheltered (arcade / awning)
-        'indoor',            '#00897b',   // teal   — inside a building
-        // Derived "approach" flag: untagged edges within ~200 ft graph-
-        // walk distance of a tagged source. Painted in a desaturated /
-        // pastel version of the source category's color so you can see
-        // what each approach attaches to.
-        'approach-of-bridge',     '#ffcdd2', // light red
-        'approach-of-tunnel',     '#bbdefb', // light blue
-        'approach-of-layered',    '#d1c4e9', // light purple
-        'approach-of-embankment', '#d7ccc8', // light brown
-        'approach-of-cutting',    '#cfd8dc', // light slate
-        'approach-of-covered',    '#fff9c4', // light amber
-        'approach-of-indoor',     '#b2dfdb', // light teal
-        '#9e9e9e',                        // default gray
-      ],
-      'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 2.0],
-      'line-opacity': 0.85,
     },
     layout: { visibility: 'none' },
   });
