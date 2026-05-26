@@ -22,13 +22,36 @@ const DIRECTIONALS = [
   ['East', 'E'],  ['West', 'W'],
 ];
 
-// Wrap a name expression so that directional words at the start or end of
-// the string become their abbreviations. MapLibre has no regex / string-
-// replace, so we chain `case` arms over `index-of` / `slice` / `concat`.
-// Structure: let n = name; let p = (prefix-swap n); (suffix-swap p).
-// Shallow (two `let` bindings) — deep-nested `let` with shadowed names
-// breaks MapLibre's initial style validation.
-function abbreviateDirectionals(nameExpr) {
+// Street-type suffixes, matched at the end of the name (with a leading
+// space) — optionally followed by a directional. Same intent as the
+// directional swap: collapse the verbose OSM form to the abbreviated form
+// the addr_search index already uses, so the basemap road labels match
+// the search-box results and the turn-by-turn directions.
+const STREET_SUFFIXES = [
+  ['Boulevard', 'Blvd'],
+  ['Parkway',   'Pkwy'],
+  ['Highway',   'Hwy'],
+  ['Terrace',   'Ter'],
+  ['Avenue',    'Ave'],
+  ['Street',    'St'],
+  ['Place',     'Pl'],
+  ['Drive',     'Dr'],
+  ['Court',     'Ct'],
+  ['Road',      'Rd'],
+  ['Lane',      'Ln'],
+];
+
+// Wrap a name expression so that directional words at the start or end
+// AND street-type suffixes become their abbreviations. MapLibre has no
+// regex / string-replace, so we chain `case` arms over `index-of` /
+// `slice` / `concat`. Pipeline:
+//     n = name
+//     p = (directional prefix swap   on n)
+//     q = (street suffix swap        on p)   ← also handles "X Street NE"
+//     (directional suffix swap       on q)
+// Each `let` binds a fresh name so MapLibre's strict initial-style
+// validator (which trips on shadowed-name nesting) stays happy.
+function abbreviateRoadName(nameExpr) {
   const prefixCase = (input) => {
     const args = [];
     for (const [full, abbr] of DIRECTIONALS) {
@@ -38,7 +61,7 @@ function abbreviateDirectionals(nameExpr) {
     }
     return ['case', ...args, input];
   };
-  const suffixCase = (input) => {
+  const directionalSuffixCase = (input) => {
     const args = [];
     for (const [full, abbr] of DIRECTIONALS) {
       const sfx = ' ' + full;
@@ -51,29 +74,81 @@ function abbreviateDirectionals(nameExpr) {
     }
     return ['case', ...args, input];
   };
+  // Street suffix swap runs BEFORE the directional suffix swap, so it
+  // can see "Street Northeast" (with the full directional still attached)
+  // and rewrite the street word while leaving "Northeast" for the next
+  // pass. We also match "Street$" alone so "NE 65th Street" works.
+  const streetSuffixCase = (input) => {
+    const args = [];
+    for (const [streetFull, streetAbbr] of STREET_SUFFIXES) {
+      // " <Street> <DirectionalFull>" at end — check these BEFORE the
+      // bare " <Street>$" arm so the longer match wins.
+      for (const [dirFull] of DIRECTIONALS) {
+        const sfx = ' ' + streetFull + ' ' + dirFull;
+        args.push(['all',
+          ['>=', ['length', input], sfx.length],
+          ['==', ['slice', input, ['-', ['length', input], sfx.length]], sfx]]);
+        args.push(['concat',
+          ['slice', input, 0, ['-', ['length', input], sfx.length]],
+          ' ' + streetAbbr + ' ' + dirFull]);
+      }
+      // " <Street>" at end with nothing after it.
+      const sfx = ' ' + streetFull;
+      args.push(['all',
+        ['>=', ['length', input], sfx.length],
+        ['==', ['slice', input, ['-', ['length', input], sfx.length]], sfx]]);
+      args.push(['concat',
+        ['slice', input, 0, ['-', ['length', input], sfx.length]],
+        ' ' + streetAbbr]);
+    }
+    return ['case', ...args, input];
+  };
   return ['let', 'n', nameExpr,
     ['let', 'p', prefixCase(['var', 'n']),
-      suffixCase(['var', 'p'])]];
+      ['let', 'q', streetSuffixCase(['var', 'p']),
+        directionalSuffixCase(['var', 'q'])]]];
 }
 
-const ROAD_NAME = abbreviateDirectionals(['get', 'name']);
+const ROAD_NAME = abbreviateRoadName(['get', 'name']);
 
 /**
- * Plain-string version of the same directional abbreviation rules — used by
- * the routing directions panel where we already have the name as a JS string
- * (not a MapLibre expression). Keeps the two surfaces in lock-step.
+ * Plain-string version of the same road-name abbreviation rules — used by
+ * the routing directions panel where we already have the name as a JS
+ * string (not a MapLibre expression). Keeps the two surfaces in lock-step.
+ * Order matches the MapLibre pipeline above:
+ *   directional prefix → street suffix → directional suffix.
  */
 export function abbreviateDirectionalsStr(name) {
   if (!name) return name;
   let s = name;
-  // Prefix swaps
+  // Directional prefix
   for (const [full, abbr] of DIRECTIONALS) {
     if (s.startsWith(full + ' ')) {
       s = abbr + ' ' + s.slice(full.length + 1);
       break;
     }
   }
-  // Suffix swaps
+  // Street suffix — try "<Street> <DirFull>" first so we can abbreviate
+  // the street word even when a full directional still trails it.
+  let streetSwapped = false;
+  for (const [streetFull, streetAbbr] of STREET_SUFFIXES) {
+    for (const [dirFull] of DIRECTIONALS) {
+      const sfx = ' ' + streetFull + ' ' + dirFull;
+      if (s.endsWith(sfx)) {
+        s = s.slice(0, s.length - sfx.length) + ' ' + streetAbbr + ' ' + dirFull;
+        streetSwapped = true;
+        break;
+      }
+    }
+    if (streetSwapped) break;
+    const sfx = ' ' + streetFull;
+    if (s.endsWith(sfx)) {
+      s = s.slice(0, s.length - sfx.length) + ' ' + streetAbbr;
+      streetSwapped = true;
+      break;
+    }
+  }
+  // Directional suffix
   for (const [full, abbr] of DIRECTIONALS) {
     if (s.endsWith(' ' + full)) {
       s = s.slice(0, s.length - full.length - 1) + ' ' + abbr;

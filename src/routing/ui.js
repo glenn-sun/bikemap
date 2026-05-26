@@ -120,6 +120,13 @@ export function initRoutingUI(map, vm = null) {
     userLocationMarker: null,
     geoWatchIdHigh: null,
     geoWatchIdLow: null,
+    locationPending: false,   // a "My location" pick is awaiting a fix
+    locationError: null,      // last error string from a failed location pick;
+                              // surfaced as subtext under "My location" in the
+                              // endpoint dropdown, not as a panel banner
+    locationDropdownRefresh: null,  // installed by the currently-focused
+                                    // endpoint dropdown so requestLocationOnce
+                                    // can re-render it as state changes
     // Two-way hover sync between elevation chart and the active route
     // line on the map. `hoverSeries` is the current active route's
     // elevation series (distances/elevations/coords); `hoverMarker` is a
@@ -200,10 +207,14 @@ export function routeFromMyLocationTo(lon, lat, label) {
   }
   setEndpoint(state, 'end', dest.spec, dest.projLon, dest.projLat, label || 'Destination');
   if (!state.userLocation) {
-    setPanel(state, '<p class="route-loading">Waiting for your location…</p>');
-    requestLocationOnce(state).then((loc) => {
-      if (!loc) {
-        setPanel(state, '<p class="route-error">Couldn’t get your location.</p>');
+    state.locationPending = true;
+    state.locationError = null;
+    state.locationDropdownRefresh?.();
+    requestLocationOnce(state).then(() => {
+      state.locationPending = false;
+      if (!state.userLocation) {
+        state.locationError = 'Couldn’t get your location';
+        state.locationDropdownRefresh?.();
         return;
       }
       applyMyLocationAsStart(state);
@@ -218,9 +229,11 @@ function applyMyLocationAsStart(state) {
   if (!u) return;
   const snap = snapToGraph(state.graph, u.lon, u.lat, 800);
   if (!snap.spec) {
-    setPanel(state, '<p class="route-error">Your location is too far from the bike network.</p>');
+    state.locationError = 'Your location is too far from the bike network.';
+    state.locationDropdownRefresh?.();
     return;
   }
+  state.locationError = null;
   setEndpoint(state, 'start', snap.spec, snap.projLon, snap.projLat, 'My location');
 }
 
@@ -1475,6 +1488,10 @@ function startUserLocationTracking(state) {
 function updateUserLocation(state, pos) {
   const { longitude: lon, latitude: lat, accuracy } = pos.coords;
   state.userLocation = { lon, lat, accuracy };
+  if (state.locationError) {
+    state.locationError = null;
+    state.locationDropdownRefresh?.();
+  }
   if (!state.userLocationMarker) {
     const el = document.createElement('div');
     el.className = 'user-location-dot';
@@ -1529,25 +1546,23 @@ function requestLocationOnce(state) {
   });
 }
 
-function pickMyLocation(state, which) {
-  if (state.userLocation) {
-    const u = state.userLocation;
-    const snap = snapToGraph(state.graph, u.lon, u.lat, 800);
-    if (!snap.spec) {
-      setPanel(state, '<p class="route-error">Your location is too far from the bike network.</p>');
-      return;
-    }
-    setEndpoint(state, which, snap.spec, snap.projLon, snap.projLat, 'My location');
-    return;
+// Snap state.userLocation to the graph and pin it as the named endpoint.
+// Returns true on success; on failure sets state.locationError so the
+// endpoint dropdown can surface it as the "My location" subtext.
+function applyUserLocationAsEndpoint(state, which) {
+  const u = state.userLocation;
+  if (!u) {
+    state.locationError = 'Couldn’t get your location';
+    return false;
   }
-  setPanel(state, '<p class="route-loading">Waiting for your location…</p>');
-  requestLocationOnce(state).then((loc) => {
-    if (!loc) {
-      setPanel(state, '<p class="route-error">Couldn’t get your location.</p>');
-      return;
-    }
-    pickMyLocation(state, which);
-  });
+  const snap = snapToGraph(state.graph, u.lon, u.lat, 800);
+  if (!snap.spec) {
+    state.locationError = 'Your location is too far from the bike network.';
+    return false;
+  }
+  state.locationError = null;
+  setEndpoint(state, which, snap.spec, snap.projLon, snap.projLat, 'My location');
+  return true;
 }
 
 // Time estimate (minutes) for a computed route. Routing is unaffected —
@@ -1659,7 +1674,9 @@ function setupSearchInput(state, inputId, dropId, opts) {
     if (opts.role !== 'endpoint') return [];
     return [
       { type: 'mylocation', icon: 'near_me', name: 'My location',
-        loc: state.userLocation },
+        loc: state.userLocation,
+        pending: state.locationPending,
+        error: state.locationError },
       { type: 'saved',  which: 'home', loc: state.home, icon: 'home', name: 'Home' },
       { type: 'saved',  which: 'work', loc: state.work, icon: 'work', name: 'Work' },
       { type: 'choose', icon: 'my_location', name: 'Choose on map',
@@ -1667,12 +1684,50 @@ function setupSearchInput(state, inputId, dropId, opts) {
     ];
   };
 
+  // Re-render the dropdown with the latest option rows (used when the
+  // pending state of a "My location" pick resolves). No-op when the
+  // dropdown isn't showing options (the user has typed a query and is
+  // now looking at address hits — don't yank the rug).
+  const refreshOptionRows = () => {
+    if (drop.hidden) return;
+    if (!currentRows.length || currentRows[0].type !== 'mylocation') return;
+    currentRows = optionRows();
+    renderRows(currentRows);
+  };
+
   const pickRow = (row) => {
     if (!row) return;
     if (row.type === 'mylocation') {
-      closeDrop();
-      input.blur();
-      pickMyLocation(state, opts.which);
+      if (state.userLocation) {
+        closeDrop();
+        input.blur();
+        applyUserLocationAsEndpoint(state, opts.which);
+        return;
+      }
+      // No fix yet — keep the dropdown open and show "Locating…" inline.
+      state.locationPending = true;
+      state.locationError = null;
+      currentRows = optionRows();
+      renderRows(currentRows);
+      requestLocationOnce(state).then(() => {
+        state.locationPending = false;
+        if (!state.userLocation) {
+          state.locationError = 'Couldn’t get your location';
+          // Refresh whichever endpoint dropdown is currently focused
+          // (the user may have already moved to the other input).
+          state.locationDropdownRefresh?.();
+          return;
+        }
+        // Success — if the user is still here, apply; otherwise just
+        // leave the new fix available for next time.
+        if (drop.hidden || !currentRows[0] || currentRows[0].type !== 'mylocation') {
+          state.locationError = null;
+          return;
+        }
+        closeDrop();
+        input.blur();
+        applyUserLocationAsEndpoint(state, opts.which);
+      });
       return;
     }
     if (row.type === 'saved') {
@@ -1739,6 +1794,8 @@ function setupSearchInput(state, inputId, dropId, opts) {
     // for the routing-endpoint inputs; the settings inputs are inside
     // their own modal.
     if (opts.role === 'endpoint') snapSheet('full');
+    // Let async location callbacks re-render this dropdown while open.
+    if (opts.role === 'endpoint') state.locationDropdownRefresh = refreshOptionRows;
     const q = input.value.trim();
     if (q.length < 2) {
       currentRows = optionRows();
@@ -1770,13 +1827,22 @@ function setupSearchInput(state, inputId, dropId, opts) {
       input.blur();
     }
   });
-  input.addEventListener('blur', () => setTimeout(closeDrop, 150));
+  input.addEventListener('blur', () => setTimeout(() => {
+    if (opts.role === 'endpoint' && state.locationDropdownRefresh === refreshOptionRows) {
+      state.locationDropdownRefresh = null;
+    }
+    closeDrop();
+  }, 150));
 }
 
 function renderRow(row, i, activeIdx) {
   const active = i === activeIdx ? ' active' : '';
   if (row.type === 'mylocation') {
-    const sub = row.loc ? 'Use my current location' : 'Locating… click to allow';
+    let sub;
+    if (row.pending) sub = 'Locating…';
+    else if (row.error) sub = row.error;
+    else if (row.loc) sub = 'Use my current location';
+    else sub = 'Tap to use your current location';
     return `<li class="addr-sugg option-row${active}" data-i="${i}">
       <span class="addr-sugg-text"><span class="material-symbols-outlined">${row.icon}</span>${escHtml(row.name)}</span>
       <span class="addr-sugg-sub">${escHtml(sub)}</span>
