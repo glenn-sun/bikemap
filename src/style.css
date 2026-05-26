@@ -1052,20 +1052,19 @@ body {
  */
 
 @media (max-width: 719px) {
-  /* === Top title bar — truly fixed to the viewport top. */
+  /* === Top title bar — floating pill mirroring the desktop layout.
+   * `position: fixed` (not absolute) so it stays glued to the viewport
+   * during sheet drag / page scroll. Background, border-radius, and
+   * box-shadow are inherited from the shared `.panel` rule above. */
   #app-header {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
+    top: 10px;
+    left: 10px;
+    right: 10px;
     width: auto;
-    border-radius: 0;
     z-index: 5;
     margin: 0;
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.96);
-    border-bottom: 1px solid #eee;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
   }
   /* Layers icon is shown only on mobile — already styled like the
    * settings gear above; just flip from display:none. */
@@ -1228,7 +1227,7 @@ body {
   background: #ececec;
   display: grid;
   place-items: center;
-  padding: calc(env(safe-area-inset-top) + 24px) 28px calc(env(safe-area-inset-bottom) + 24px);
+  padding: calc(env(safe-area-inset-top) + 24px) 40px calc(env(safe-area-inset-bottom) + 24px);
 }
 .install-card {
   background: #fff;
@@ -1240,6 +1239,20 @@ body {
   text-align: center;
   font-size: 14px;
   color: #222;
+}
+.install-icon {
+  width: 96px;
+  height: 96px;
+  /* The PNG is a circle with transparent corners — match the box bounds
+   * so the drop shadow follows the circle rather than the rounded-square
+   * envelope. */
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.install-card h2 {
+  margin: 16px 0 8px;
+  font-size: 22px;
+  font-weight: 600;
 }
 .install-card p {
   margin: 0 0 16px;
@@ -1275,7 +1288,6 @@ body {
 }
 .install-aside {
   font-size: 13px;
-  font-style: italic;
   color: #666;
   margin: -8px 0 16px;
 }
@@ -1410,10 +1422,13 @@ body {
 .brand-link-github:hover { background: #1c2025; }
 
 /* Standalone display-mode (installed PWA): clear iOS dynamic island and
-   keep the bottom sheet's drag pill out from under the home indicator. */
+   keep the bottom sheet's drag pill out from under the home indicator.
+   The header is a floating pill (desktop and mobile) — nudge its `top`
+   below the safe area rather than fattening padding-top, so the pill
+   stays its normal height and the safe area shows map underneath. */
 @media all and (display-mode: standalone) {
   #app-header {
-    padding-top: calc(env(safe-area-inset-top) + 6px);
+    top: calc(env(safe-area-inset-top) + 10px);
   }
   #sheet {
     padding-bottom: env(safe-area-inset-bottom);
