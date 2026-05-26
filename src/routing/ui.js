@@ -1726,7 +1726,7 @@ function setupSearchInput(state, inputId, dropId, opts) {
     }
     const center = state.map.getCenter();
     const hits = await searchAddresses(q, {
-      limit: 6, mapCenter: [center.lng, center.lat],
+      limit: 50, mapCenter: [center.lng, center.lat],
     });
     currentRows = hits.map((h) => ({ ...h, type: 'hit' }));
     activeIdx = -1;

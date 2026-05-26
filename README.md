@@ -1,92 +1,105 @@
-# Seattle Bike Map
+# Open Bike Map Seattle
 
-A static MapLibre + Protomaps rendering of Seattle's bike infrastructure,
-sourced from SDOT's public ArcGIS services and King County's GIS portal.
-No API keys, no third-party tile provider — everything ships in the repo.
+A bike map for Seattle, with Seattle-specific data that other maps don't have. Built with open data. Check it out at https://www.openbikemapseattle.com.
 
-## Quickstart
+![Open Bike Map Seattle](screenshot.png)
+
+## Features 
+
+**See more infrastructure at a glance.** Open Bike Map Seattle shows the following layers on the map:
+
+* All ages & abilities routes, including neighborhood greenways
+* Every public bike rack and bicycle wayfinding sign in the city
+* Public restrooms, parks, and other points of interest
+* Under construction routes and official city future plans
+
+**Ride comfortably and safely.** Using city data and other sources, directions to your destination consider the following factors:
+
+* The level of bike infrastructure
+* How wide the roads are
+* If protected crossings such as traffic signals are available
+* How many turns are involved in the route
+* Elevation, computed intelligently to recognize bridges and overpasses correctly
+
+**And more miscellaneous features.**
+
+* Works 100% offline
+* Regular data updates will be available
+* Sidewalk riding
+* Customized profiles for your riding priorities
+
+## Install
+
+### iPhone
+
+Navigate to [Open Bike Map Seattle](https://www.openbikemapseattle.com) in Safari → Share → **Add to Home Screen**.
+
+### Android
+
+Navigate to [Open Bike Map Seattle](https://www.openbikemapseattle.com) in Chrome → menu → **Install app**. 
+
+
+## Data sources
+
+| Layer | Source |
+|---|---|
+| Bike facilities, multi-use trails, Bike+ Network, bike racks, wayfinding signs | [SDOT Open Data](https://data-seattlecitygis.opendata.arcgis.com/) |
+| Traffic signals, stop signs, crosswalks, beacons, traffic circles | SDOT |
+| Street centerlines, libraries, community centers, park restrooms | SDOT |
+| Regional trails outside Seattle | [King County GIS](https://gis-kingcounty.opendata.arcgis.com/) |
+| Light rail stations | [Sound Transit](https://www.soundtransit.org/) (via SDOT) |
+| Street network, addresses, POIs | [OpenStreetMap](https://www.openstreetmap.org/) |
+| Basemap tiles | [Protomaps](https://protomaps.com/) daily build |
+| Elevation | [USGS 3DEP](https://www.usgs.gov/3d-elevation-program) 1/3 arc-second DTM |
+
+## For developers
 
 ```bash
 npm install
 npm run dev      # http://localhost:5173
 ```
 
-The repo already contains `public/data/*.geojson` and `public/tiles/seattle.pmtiles`,
-so the map runs out of the box.
+The shipped repo includes pre-built data (`public/data/`) and a Seattle
+PMTiles extract (`public/tiles/`), so the app runs out of the box. See
+[CLAUDE.md](CLAUDE.md) for the full architecture, build pipeline, and
+design notes — including how the routing cost function works, the
+elevation-correction pipeline, and the offline PWA install/update flow.
 
-## Refreshing the data
-
-Pull the latest SDOT / King County data (re-run any time):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install requests
-python3 scripts/fetch_data.py
-```
-
-Overwrites every file in `public/data/`. Filters from the official ArcGIS
-experience are preserved (light rail stations limited to `STATUS = 'COMPLETE'`,
-bike signs limited to `CATEGORY = 'GBP'`, King County trails limited to
-regional paved trails outside Seattle).
-
-## Refreshing the basemap
+To refresh the data from upstream sources:
 
 ```bash
-bash scripts/make_basemap.sh 20260521   # pick a recent date from build.protomaps.com
+python3 -m venv .venv && source .venv/bin/activate
+pip install requests shapely numpy rasterio scipy scikit-image
+python3 scripts/fetch_data.py            # SDOT / King County GeoJSON
+python3 scripts/build_graph.py           # routing graph from OSM + SDOT joins
+python3 scripts/sample_dtm.py            # USGS elevation per node + per edge
+python3 scripts/resolve_elevation.py     # heat-eq smoothing over bridges/tunnels
+python3 scripts/build_addr_index.py      # OSM addresses + POIs
+python3 scripts/build_data_manifest.py   # PWA version manifest (always last)
 ```
 
-`pmtiles extract` clips a Seattle-area window (`-122.55,47.40,-121.95,47.85`,
-maxzoom 15) directly from the global Protomaps daily build using HTTP range
-requests — the full ~120 GB planet is never downloaded. Output is ~60 MB.
-
-Install the `pmtiles` CLI once: `brew install pmtiles`.
-
-## Deploy to GitHub Pages
+To refresh the basemap from a recent Protomaps daily build:
 
 ```bash
-npm run build
-# dist/ contains the static site; push to gh-pages or wire a GH Action.
+brew install pmtiles
+bash scripts/make_basemap.sh YYYYMMDD    # pick a date from build.protomaps.com
 ```
 
-`vite.config.js` uses `base: './'` so the build works under any GitHub Pages
-path (root or subpath).
+To build for deploy:
 
-## Layers
-
-| Layer | Source | Filter |
-|---|---|---|
-| Existing Bike Facilities | SDOT `SDOT_Bike_Facilities/2` | colored per `CATEGORY` (PBL, BBL, BL, NGW, …) |
-| Multi-Use Trails (Seattle) | SDOT `SDOT_Bike_Facilities/1` | — |
-| Bike+ Network (existing + planned) | SDOT `Seattle_Transportation_Plan_Bicycle_Element/9` | dashed if proposed |
-| Bicycle Racks | SDOT `Bicycle_Racks_(Active)/0` | shown z≥13 |
-| King County Regional Trails | KC `recreatn__trail_line/MapServer/273` | paved, regional, outside Seattle |
-| Link Light Rail Stations | SDOT `Sound_Transit_Link_Light_Station_Point/0` | `STATUS='COMPLETE'` |
-| Seattle Public Library | SDOT `Seattle_Public_Library/0` | — |
-| Community Centers | SDOT `Community_Centers/0` | — |
-| Park Restrooms | SDOT `Parks_Restrooms/0` | — |
-| Seattle City Limits | SDOT `Seattle_City_Limits/0` | — |
-| Bike Route Signs | SDOT `SDOT_Street_Signs/1` | `CATEGORY='GBP'`, shown z≥14 |
-
-## Layout
-
-```
-src/main.js          MapLibre init, PMTiles protocol, Protomaps style
-src/layers.js        All 11 SDOT/KC sources + paint properties
-public/data/         GeoJSON snapshots (regenerated via fetch_data.py)
-public/tiles/        Seattle-area PMTiles basemap (regenerated via make_basemap.sh)
-scripts/             Data + basemap regeneration
+```bash
+npm run build:pwa     # icons, fonts, data manifest
+npm run build         # vite → dist/
 ```
 
-## Verification
+`vite.config.js` uses `base: './'`, so the build works under any GitHub
+Pages path.
 
-After `npm run dev`, expect:
+## Credits
 
-1. Map opens centered on downtown Seattle at z≈11.5 on a clean Protomaps light basemap.
-2. Bike facilities visible as colored lines (orange BL, blue PBL, light blue BBL, green NGW).
-3. Bike+ Network planned segments rendered as dashed lines in the same palette.
-4. King County regional trails appear as dashed purple east of city limits — Sammamish River, East Lake Sammamish, etc.
-5. Light rail stations (teal dots) line up along the 1 Line from Northgate to Angle Lake.
-6. Zoom past 13 → individual bike racks become visible as dark dots.
-7. Zoom past 14 → bike route signs become faint blue dots.
-8. URL hash tracks center/zoom (`#zoom/lat/lng`) for shareable views.
+Built on [MapLibre GL JS](https://maplibre.org/),
+[Protomaps](https://protomaps.com/),
+[PMTiles](https://github.com/protomaps/PMTiles),
+[FlexSearch](https://github.com/nextapps-de/flexsearch), and the work of
+OpenStreetMap, SDOT, King County GIS, and USGS. UI icons by Google
+Material Symbols.
