@@ -377,7 +377,7 @@ export async function addDataLayers(map, beforeId = undefined) {
     },
   });
 
-  // Bike route signs — brown wayfinding dots, distinct from the standard
+  // Bike route signs — green wayfinding dots, distinct from the standard
   // blue user-location marker. Slightly larger than bike-rack dots.
   add({
     id: 'bike-signs',
@@ -385,7 +385,7 @@ export async function addDataLayers(map, beforeId = undefined) {
     source: 'bike_signs',
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 0.7, 13, 2.5, 17, 5],
-      'circle-color': '#6d4c41',
+      'circle-color': '#1F6B3D',
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 12, 0, 14, 0.5],
       'circle-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.35, 14, 0.85],

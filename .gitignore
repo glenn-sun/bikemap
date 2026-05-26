@@ -6,3 +6,6 @@ dist/
 *.log
 dsm_cache/
 dtm_cache/
+__pycache__/
+.claude/
+CLAUDE.md

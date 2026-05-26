@@ -40,8 +40,8 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 PUBLIC = ROOT / "public"
 
-# Explicit list, not a glob — keeps staging files like contours_new.geojson
-# from accidentally shipping. Add new data files here as the app grows.
+# Explicit list, not a glob — keeps any future staging files from accidentally
+# shipping. Add new data files here as the app grows.
 TARGETS = [
     # (relative path under public/, gzip-on-transit?)
     ("tiles/seattle.pmtiles",            False),  # pmtiles is internally compressed

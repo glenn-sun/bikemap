@@ -20,10 +20,7 @@ Outputs:
                                      terms — temporarily, until v3 lands
                                      a real pipeline that smooths /
                                      corrects bridges.
-  - public/data/contours_new.geojson 25-ft contour lines (-50 .. 500 ft).
-                                     Written to a side path so we can
-                                     verify against the existing snapshot
-                                     before swapping.
+  - public/data/contours.geojson     25-ft contour lines (-50 .. 500 ft).
 
 v3 will build on top of this — for now it's a baseline "DTM-only, no
 smoothing" sample for visual debugging and routing-cost wiring.
@@ -52,7 +49,7 @@ DTM_URL = (
 DTM_VSICURL = f"/vsicurl/{DTM_URL}"
 
 GRAPH_PATH    = Path("public/data/routing_graph.json")
-CONTOURS_OUT  = Path("public/data/contours_new.geojson")
+CONTOURS_OUT  = Path("public/data/contours.geojson")
 WINDOW_CACHE  = Path("dtm_cache/seattle_window.npy")
 WINDOW_META   = Path("dtm_cache/seattle_window.json")
 
