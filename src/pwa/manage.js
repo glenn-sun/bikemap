@@ -5,7 +5,12 @@
 //  - "Delete data" prompts confirmation, clears caches + install flag, reloads.
 
 import { getUpdateStatus, applyUpdate, deleteAllData } from './update.js';
-import { formatBytes } from './version.js';
+import { formatBytes, getCachedManifest } from './version.js';
+
+// GitHub commit URL pattern — used to link the displayed appVersion SHA
+// to the exact code that's installed. Same repo as the About → "View
+// source" link.
+const COMMIT_URL_PREFIX = 'https://github.com/glenn-sun/bikemap/commit/';
 import {
   isIOS,
   isStandalone,
@@ -34,6 +39,9 @@ export function initManageData() {
     // state can change (user installed via URL-bar icon, or the deferred
     // prompt arrived after first render).
     syncInstallButton();
+    // Refresh the installed-version line. Re-read every open in case an
+    // update was just applied in this session.
+    refreshInstalledVersion();
   });
 
   deleteBtn.addEventListener('click', async () => {
@@ -154,6 +162,61 @@ function syncInstallButton() {
   }
   btn.setAttribute('hidden', '');
   hint?.setAttribute('hidden', '');
+}
+
+// Render the "Installed <date> · <sha>" line under the Manage data
+// buttons. Reads the cached install manifest (written at install-time
+// by install.js and on each update by update.js) — both fields are
+// optional, so the line gracefully degrades if either is missing
+// (e.g. installs from before appVersion was added).
+async function refreshInstalledVersion() {
+  const el = document.getElementById('settings-version-info');
+  if (!el) return;
+  el.replaceChildren();
+  const manifest = await getCachedManifest();
+  if (!manifest) {
+    el.setAttribute('hidden', '');
+    return;
+  }
+  const parts = [];
+  if (manifest.version) {
+    const span = document.createElement('span');
+    span.textContent = `Installed ${formatVersionDate(manifest.version)}`;
+    parts.push(span);
+  }
+  if (manifest.appVersion && /^[0-9a-f]{7,40}$/i.test(manifest.appVersion)) {
+    const a = document.createElement('a');
+    a.href = COMMIT_URL_PREFIX + manifest.appVersion;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.className = 'manage-data-version-sha';
+    a.textContent = manifest.appVersion.slice(0, 7);
+    parts.push(a);
+  }
+  if (!parts.length) {
+    el.setAttribute('hidden', '');
+    return;
+  }
+  parts.forEach((node, i) => {
+    if (i > 0) el.appendChild(document.createTextNode(' · '));
+    el.appendChild(node);
+  });
+  el.removeAttribute('hidden');
+}
+
+// build_data_manifest.py emits version as `YYYYMMDD-HHMMSS` in local
+// build-machine time (CI runs in UTC, so for our deploys it IS UTC).
+// Parse loosely; fall through to the raw string if it doesn't match
+// (e.g. a future schema change or a manually-edited manifest).
+function formatVersionDate(v) {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(v);
+  if (!m) return v;
+  const [, y, mo, d] = m;
+  const date = new Date(Date.UTC(+y, +mo - 1, +d));
+  if (isNaN(date.getTime())) return v;
+  return date.toLocaleDateString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+  });
 }
 
 // Atomically swap the button's click handler. Uses a `_pwaHandler` slot

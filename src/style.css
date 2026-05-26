@@ -1379,6 +1379,24 @@ body {
 }
 .manage-data-hint[hidden] { display: none; }
 
+.manage-data-version {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #777;
+  line-height: 1.4;
+}
+.manage-data-version[hidden] { display: none; }
+.manage-data-version a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dotted #bbb;
+}
+.manage-data-version a:hover { color: #e91e63; border-bottom-color: #e91e63; }
+.manage-data-version-sha {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
 .settings-disclaimer {
   margin: 0;
   font-size: 13px;

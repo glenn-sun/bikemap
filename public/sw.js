@@ -154,16 +154,28 @@ async function cacheFirst(req, cacheName) {
   }
 }
 
+// Network-first with timeout, falling back to the cached entry on
+// timeout / network failure. Intentionally does NOT write the network
+// response back to the cache.
+//
+// The sole caller is the /data/version.json path. That URL's cache
+// slot is owned by install.js + update.js as the "installed manifest"
+// baseline — the one we diff against the live remote manifest to
+// detect available updates. If the SW wrote network responses back
+// here, every successful network-first fetch would silently set
+// `installed == remote`, making `diffManifests()` return empty and
+// `getUpdateStatus()` always report "no updates available". The bug
+// is timing-dependent: it only fires when the network race wins
+// the 3 s timeout, so it stayed latent behind a slow GH Pages
+// origin and showed up after Cloudflare's edge cut latency.
 async function networkFirst(req, cacheName, timeoutMs) {
-  const cache = await caches.open(cacheName);
   try {
-    const resp = await Promise.race([
+    return await Promise.race([
       fetch(req),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs)),
     ]);
-    if (resp.ok) cache.put(req, resp.clone()).catch(() => {});
-    return resp;
   } catch (e) {
+    const cache = await caches.open(cacheName);
     const cached = await cache.match(req);
     if (cached) return cached;
     throw e;
