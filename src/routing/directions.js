@@ -5,7 +5,7 @@
 // Annotates steps that traverse a BKF-ONEWAY bike facility with the
 // "may or may not be in direction of travel" disclaimer.
 
-import { abbreviateDirectionalsStr } from '../labels.js';
+import { normalizeAddress } from '../road_names.js';
 import { TURN_THRESHOLD_DEG } from './cost.js';
 
 const SHARP_DEG = 110;
@@ -136,7 +136,7 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
       }
     }
     const sidewalkPhrase = allSidewalk
-      ? (name ? `the ${sidewalkSide ? sidewalkSide + ' ' : ''}sidewalk of ${abbreviateDirectionalsStr(name)}`
+      ? (name ? `the ${sidewalkSide ? sidewalkSide + ' ' : ''}sidewalk of ${normalizeAddress(name)}`
               : `the ${sidewalkSide ? sidewalkSide + ' ' : ''}sidewalk`)
       : null;
 
@@ -147,7 +147,7 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
         instruction = `Head ${heading} on ${sidewalkPhrase}`;
       } else {
         instruction = `Head ${heading}`
-                    + (name ? ` on ${abbreviateDirectionalsStr(name)}` : '');
+                    + (name ? ` on ${normalizeAddress(name)}` : '');
       }
     } else {
       // Turn classification based on bearing change at the join.
@@ -159,7 +159,7 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
         instruction = `${turn} onto ${sidewalkPhrase}`;
       } else {
         instruction = name
-          ? `${turn} onto ${abbreviateDirectionalsStr(name)}`
+          ? `${turn} onto ${normalizeAddress(name)}`
           : `${turn}`;
       }
     }
@@ -207,7 +207,7 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
 
     steps.push({
       instruction,
-      streetName: name ? abbreviateDirectionalsStr(name) : '',
+      streetName: name ? normalizeAddress(name) : '',
       distanceFt,
       annotations,
       maneuverLonLat,
@@ -220,7 +220,7 @@ export function buildDirections(graph, pathEdgeIds, routeStartLonLat, routeEndLo
   steps.push({
     instruction: 'Arrive at destination',
     streetName: graph.edgeStreetName(last)
-      ? abbreviateDirectionalsStr(graph.edgeStreetName(last))
+      ? normalizeAddress(graph.edgeStreetName(last))
       : '',
     distanceFt: 0,
     annotations: [],

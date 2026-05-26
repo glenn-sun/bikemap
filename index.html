@@ -42,9 +42,18 @@
           </div>
           <div id="install-error" hidden></div>
           <details id="ios-hint" hidden>
-            <summary>On iPhone? Tap Share → Add to Home Screen first.</summary>
-            <p>For full offline support, install this site to your home screen via Safari's Share menu, then reopen from the new icon.</p>
+            <summary>On Safari or iOS? Tap Share → Add to Home Screen for full offline support.</summary>
+            <p>All data for this app is stored locally on your device. Safari will delete this data after 7 days of inactivity if you do not add this site to your home screen.</p>
           </details>
+        </div>
+        <!-- Beta notice — shown after the download completes on every
+             platform, before the optional install-prompt step. -->
+        <div id="install-step-beta" hidden>
+          <p>This app is in beta. Some features may not work or be unavailable.</p>
+          <p>Issue reports on GitHub through the Settings menu are welcome.</p>
+          <div class="install-actions">
+            <button id="install-step-beta-proceed" type="button" class="install-cta">Proceed</button>
+          </div>
         </div>
         <!-- Step 2 is shown only on Chrome/Edge after the download completes,
              when a deferred `beforeinstallprompt` event is available. Skipped
@@ -52,7 +61,7 @@
              event never fired. -->
         <div id="install-step2" hidden>
           <p>For easier access, install Open Bike Map Seattle to your home screen.</p>
-          <p class="install-aside">You can always install later through the Settings menu.</p>
+          <p>You can always install later through the Settings menu.</p>
           <div class="install-actions">
             <button id="install-step2-yes" type="button" class="install-cta">Install app</button>
             <button id="install-step2-no" type="button" class="install-cta install-cta-secondary">Continue to website</button>

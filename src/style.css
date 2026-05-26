@@ -1397,6 +1397,17 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
 }
+.manage-data-version-beta {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e91e63;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  vertical-align: 1px;
+}
 
 .settings-disclaimer {
   margin: 0;

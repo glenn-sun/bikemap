@@ -1,6 +1,6 @@
 # Open Bike Map Seattle
 
-A bike map for Seattle, with Seattle-specific data that other maps don't have. Built with open data. Check it out at https://www.openbikemapseattle.com.
+A bike map for Seattle, built with large amounts of open data for better exploration and directions. Check it out at https://www.openbikemapseattle.com.
 
 [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/glennsun)
 
@@ -32,17 +32,6 @@ A bike map for Seattle, with Seattle-specific data that other maps don't have. B
 * Sidewalk riding
 * Customized profiles for your riding priorities
 
-## Install
-
-### iPhone
-
-Navigate to [Open Bike Map Seattle](https://www.openbikemapseattle.com) in Safari → Share → **Add to Home Screen**.
-
-### Android
-
-Navigate to [Open Bike Map Seattle](https://www.openbikemapseattle.com) in Chrome → menu → **Install app**. 
-
-
 ## Data sources
 
 | Layer | Source |
@@ -64,10 +53,7 @@ npm run dev      # http://localhost:5173
 ```
 
 The shipped repo includes pre-built data (`public/data/`) and a Seattle
-PMTiles extract (`public/tiles/`), so the app runs out of the box. See
-[CLAUDE.md](CLAUDE.md) for the full architecture, build pipeline, and
-design notes — including how the routing cost function works, the
-elevation-correction pipeline, and the offline PWA install/update flow.
+PMTiles extract (`public/tiles/`), so the app runs out of the box.
 
 To refresh the data from upstream sources:
 

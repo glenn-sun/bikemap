@@ -82,6 +82,7 @@ function runInstallModal(manifest) {
           }
         });
         await cacheManifest(manifest);
+        await showBetaStep(modal);
         await maybeShowInstallStep(modal);
         modal.setAttribute('hidden', '');
         resolve();
@@ -95,6 +96,25 @@ function runInstallModal(manifest) {
         // Don't reject — let the user retry by clicking the CTA again.
       }
     }, { once: false });
+  });
+}
+
+// After the data download finishes, swap step1 for the beta notice and
+// wait for the user to click Proceed. Shown on every platform.
+function showBetaStep(modal) {
+  const step1 = modal.querySelector('#install-step1');
+  const stepBeta = modal.querySelector('#install-step-beta');
+  const proceed = modal.querySelector('#install-step-beta-proceed');
+  if (!step1 || !stepBeta || !proceed) return Promise.resolve();
+  step1.setAttribute('hidden', '');
+  stepBeta.removeAttribute('hidden');
+  return new Promise((res) => {
+    const onClick = () => {
+      proceed.removeEventListener('click', onClick);
+      stepBeta.setAttribute('hidden', '');
+      res();
+    };
+    proceed.addEventListener('click', onClick);
   });
 }
 

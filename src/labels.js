@@ -7,39 +7,12 @@
 //
 // Fonts come from protomaps.github.io/basemaps-assets/fonts (key-free).
 
+import { DIRECTIONALS, STREET_SUFFIXES } from './road_names.js';
+
 const TEXT_HALO_COLOR = 'rgba(255,255,255,0.95)';
 const PRIMARY_TEXT    = '#3a3a3a';
 const PLACE_TEXT      = '#222';
 const WATER_TEXT      = '#3f7fa0';
-
-// Compound directions checked first so "North " (single) doesn't shadow
-// "Northwest " — both end with a space so a single won't match a compound
-// prefix anyway, but ordering keeps the generated expression readable.
-const DIRECTIONALS = [
-  ['Northwest', 'NW'], ['Northeast', 'NE'],
-  ['Southwest', 'SW'], ['Southeast', 'SE'],
-  ['North', 'N'], ['South', 'S'],
-  ['East', 'E'],  ['West', 'W'],
-];
-
-// Street-type suffixes, matched at the end of the name (with a leading
-// space) — optionally followed by a directional. Same intent as the
-// directional swap: collapse the verbose OSM form to the abbreviated form
-// the addr_search index already uses, so the basemap road labels match
-// the search-box results and the turn-by-turn directions.
-const STREET_SUFFIXES = [
-  ['Boulevard', 'Blvd'],
-  ['Parkway',   'Pkwy'],
-  ['Highway',   'Hwy'],
-  ['Terrace',   'Ter'],
-  ['Avenue',    'Ave'],
-  ['Street',    'St'],
-  ['Place',     'Pl'],
-  ['Drive',     'Dr'],
-  ['Court',     'Ct'],
-  ['Road',      'Rd'],
-  ['Lane',      'Ln'],
-];
 
 // Wrap a name expression so that directional words at the start or end
 // AND street-type suffixes become their abbreviations. MapLibre has no
@@ -51,6 +24,10 @@ const STREET_SUFFIXES = [
 //     (directional suffix swap       on q)
 // Each `let` binds a fresh name so MapLibre's strict initial-style
 // validator (which trips on shadowed-name nesting) stays happy.
+//
+// The DIRECTIONALS / STREET_SUFFIXES lists live in road_names.js so the
+// JS normalizer used by addr_search and the directions panel stays in
+// lock-step with what the map labels show.
 function abbreviateRoadName(nameExpr) {
   const prefixCase = (input) => {
     const args = [];
@@ -110,53 +87,6 @@ function abbreviateRoadName(nameExpr) {
 }
 
 const ROAD_NAME = abbreviateRoadName(['get', 'name']);
-
-/**
- * Plain-string version of the same road-name abbreviation rules — used by
- * the routing directions panel where we already have the name as a JS
- * string (not a MapLibre expression). Keeps the two surfaces in lock-step.
- * Order matches the MapLibre pipeline above:
- *   directional prefix → street suffix → directional suffix.
- */
-export function abbreviateDirectionalsStr(name) {
-  if (!name) return name;
-  let s = name;
-  // Directional prefix
-  for (const [full, abbr] of DIRECTIONALS) {
-    if (s.startsWith(full + ' ')) {
-      s = abbr + ' ' + s.slice(full.length + 1);
-      break;
-    }
-  }
-  // Street suffix — try "<Street> <DirFull>" first so we can abbreviate
-  // the street word even when a full directional still trails it.
-  let streetSwapped = false;
-  for (const [streetFull, streetAbbr] of STREET_SUFFIXES) {
-    for (const [dirFull] of DIRECTIONALS) {
-      const sfx = ' ' + streetFull + ' ' + dirFull;
-      if (s.endsWith(sfx)) {
-        s = s.slice(0, s.length - sfx.length) + ' ' + streetAbbr + ' ' + dirFull;
-        streetSwapped = true;
-        break;
-      }
-    }
-    if (streetSwapped) break;
-    const sfx = ' ' + streetFull;
-    if (s.endsWith(sfx)) {
-      s = s.slice(0, s.length - sfx.length) + ' ' + streetAbbr;
-      streetSwapped = true;
-      break;
-    }
-  }
-  // Directional suffix
-  for (const [full, abbr] of DIRECTIONALS) {
-    if (s.endsWith(' ' + full)) {
-      s = s.slice(0, s.length - full.length - 1) + ' ' + abbr;
-      break;
-    }
-  }
-  return s;
-}
 
 /**
  * Returns the label layer array to append on top of the basemap fills/lines.

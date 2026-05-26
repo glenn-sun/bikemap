@@ -197,8 +197,12 @@ async function refreshInstalledVersion() {
     el.setAttribute('hidden', '');
     return;
   }
-  parts.forEach((node, i) => {
-    if (i > 0) el.appendChild(document.createTextNode(' · '));
+  const betaChip = document.createElement('span');
+  betaChip.className = 'manage-data-version-beta';
+  betaChip.textContent = 'BETA';
+  el.appendChild(betaChip);
+  parts.forEach((node) => {
+    el.appendChild(document.createTextNode(' · '));
     el.appendChild(node);
   });
   el.removeAttribute('hidden');

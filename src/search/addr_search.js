@@ -10,47 +10,9 @@
 //     x: <lon>, y: <lat> }
 
 import FlexSearch from 'flexsearch';
+import { normalizeAddress } from '../road_names.js';
 
 const INDEX_URL = `${import.meta.env.BASE_URL}data/addr_index.json`;
-
-// Display-and-search normalization: Seattle's OSM addresses mix the
-// long ("Northeast 65th Street") and abbreviated ("NE 65th St") forms
-// of directionals and street types, sometimes in the same record
-// ("Northeast 65th Street & Wellesley Way Northeast"). Collapsing
-// both to the abbreviated form makes the dropdown consistent AND lets
-// a query typed in either form match the index.
-const ABBREVIATIONS = [
-  // Directionals — apply two-word forms before single-word ones so
-  // "Northeast" doesn't tokenize to "N E".
-  [/\bnortheast\b/gi, 'NE'],
-  [/\bnorthwest\b/gi, 'NW'],
-  [/\bsoutheast\b/gi, 'SE'],
-  [/\bsouthwest\b/gi, 'SW'],
-  [/\bnorth\b/gi,     'N'],
-  [/\bsouth\b/gi,     'S'],
-  [/\beast\b/gi,      'E'],
-  [/\bwest\b/gi,      'W'],
-  // Common street-type suffixes — same rationale: OSM is inconsistent
-  // between "Street" and "St", "Avenue" and "Ave", etc.
-  [/\bstreet\b/gi,    'St'],
-  [/\bavenue\b/gi,    'Ave'],
-  [/\bboulevard\b/gi, 'Blvd'],
-  [/\bparkway\b/gi,   'Pkwy'],
-  [/\bhighway\b/gi,   'Hwy'],
-  [/\bterrace\b/gi,   'Ter'],
-  [/\bplace\b/gi,     'Pl'],
-  [/\bdrive\b/gi,     'Dr'],
-  [/\bcourt\b/gi,     'Ct'],
-  [/\broad\b/gi,      'Rd'],
-  [/\blane\b/gi,      'Ln'],
-];
-
-export function normalizeAddress(s) {
-  if (!s) return s;
-  let r = s;
-  for (const [re, abbr] of ABBREVIATIONS) r = r.replace(re, abbr);
-  return r;
-}
 
 let loadPromise = null;   // resolves to { records, index } on first call
 
