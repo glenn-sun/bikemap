@@ -160,6 +160,7 @@ python3 scripts/build_graph.py         # OSM (Overpass) + SDOT joins → routing
 python3 scripts/sample_dtm.py          # smoothed DTM + resampling → nodes.elev[]/geomElevs[]/edge climb + contours.geojson
 python3 scripts/resolve_elevation.py   # heat-eq smoothing on flagged subgraph → rewrites nodes.elev/geomElevs + edge climb metrics
 python3 scripts/build_addr_index.py    # OSM addresses + named POIs → addr_index.json
+python3 scripts/build_data_manifest.py # PWA: hash+size+gzipSize → public/data/version.json (MUST run last)
 ```
 `build_graph.py` reads the GeoJSONs `fetch_data.py` writes, so run them
 in order. `sample_dtm.py` reads the graph that `build_graph.py` writes
@@ -283,10 +284,18 @@ experience, shrinks the snapshot):
   head north (0°) gives `delta = -90` — counter-clockwise = LEFT in driving
   convention. Easy to flip; `classifyTurn` originally had it backwards.
 - **`map.on('click', 'layer-x', ...)` fires INDEPENDENTLY of other layer
-  click handlers — `preventDefault()` does not stop them.** To suppress
-  popups for layers underneath a clicked route line, use
-  `map.queryRenderedFeatures(e.point, { layers: ['route-line', 'route-alt-line'] })`
-  and early-return when any feature is found. See `src/popups.js`.
+  click handlers — `preventDefault()` does not stop them.** Two
+  consequences in `src/popups.js`:
+  1. **To suppress popups for layers underneath a clicked route line**,
+     use `map.queryRenderedFeatures(e.point, { layers: ['route-line',
+     'route-alt-line'] })` and early-return when any feature is found.
+  2. **To ensure only one popup opens per click** when multiple POI /
+     bike-facility layers stack at the same pixel, register ONE global
+     `map.on('click', ...)` handler that runs `queryRenderedFeatures`
+     over all clickable layers and shows the topmost feature only
+     (`features[0]`). Per-layer click handlers fire independently and
+     each would open its own popup. Cursor-style hover handlers still
+     bind per-layer (they're naturally layer-scoped).
 
 ### Preview server (`preview_*` tools)
 
@@ -1370,6 +1379,156 @@ Decisions worth remembering:
   tracks whether the panel is currently visible. Pink "active" is the
   established affordance for "this toggle is on" — see the segmented
   control's checked label and the Go-button on POI popups.
+
+## PWA architecture
+
+The app is a fully installable PWA with blocking first-run install and
+automatic update detection. After install, every byte of data is served
+from the local cache — the app boots and operates with zero network
+round-trips. The owner explicitly chose blocking install (no online-only
+escape hatch).
+
+### Runtime states
+
+A single `localStorage['bikemap-installed-version']` flag (the version
+string of the last installed `version.json`) drives three states:
+
+1. **Uninstalled** — `src/main.js`'s `boot()` calls `ensureInstalled()`
+   which shows `#install-modal` and blocks `initApp()`. The modal CTA
+   ("Download now") streams every file in `public/data/version.json`
+   into the SW data cache with per-file streaming progress, then sets
+   the flag and lets `initApp()` proceed.
+2. **Installed (current)** — flag exists, cached `version.json` matches
+   remote. `ensureInstalled()` returns immediately; map init runs; every
+   data `fetch()` is served from the SW cache.
+3. **Update available** — flag exists, but remote `version.json` differs
+   from cached. App boots normally on cached data; `checkForUpdate()`
+   shows the non-blocking `#update-banner` with the size delta of
+   *changed files only* (per-file hash diff).
+
+### Service worker (`public/sw.js`)
+
+Three caches with intentionally different lifecycles:
+
+| Cache | Contents | Lifecycle |
+|---|---|---|
+| `bikemap-shell-v${APP_VERSION}` | HTML, JS, CSS, vendored font | Activate event deletes old shell-v* caches |
+| `bikemap-data-v1` | PMTiles, GeoJSONs, addr/graph JSON, `version.json` | **Never** cleared by SW lifecycle; managed by `src/pwa/install.js` + `update.js` |
+| `bikemap-external-v1` | `protomaps.github.io/basemaps-assets/*` (sprites + glyphs) | Stale-while-revalidate |
+
+Fetch routing priority in the SW:
+1. `*.pmtiles` → `handlePmtilesRange()` slices the cached ArrayBuffer per
+   `Range:` header, returns `206 Partial Content` with proper
+   `Content-Range`/`Content-Length`/`Accept-Ranges`. The SW caches the
+   full body once; subsequent range requests slice in-memory.
+2. `/data/version.json` → network-first with 3s timeout (so updates are
+   noticed fast).
+3. `/data/*` → cache-first.
+4. `protomaps.github.io` → SWR.
+5. Same-origin → cache-first (shell cache).
+6. Else → passthrough.
+
+Two placeholders in `sw.js` are rewritten at build time by
+`vite-plugins/precache-manifest.js`:
+- `__APP_VERSION__` — used in shell cache name (defaults to a UTC
+  timestamp; override with `APP_VERSION=foo npm run build`)
+- `__PRECACHE_MANIFEST__` — array of dist-relative paths the SW
+  pre-caches on install (everything in `dist/` minus `tiles/`, `data/`,
+  `sw.js`, `manifest.webmanifest`, and the bikemap.svg source)
+
+### Install / update flow
+
+`src/pwa/install.js` (`ensureInstalled`):
+- Returns immediately if the install flag is set.
+- Otherwise waits for the SW to be controlling
+  (`navigator.serviceWorker.ready` via `waitForController()`).
+- Fetches `./data/version.json` from network (no cache yet).
+- Populates `#install-size` with `formatBytes(totalGzippedBytes)`.
+- Shows iOS hint (`#ios-hint`) when `isIOS() && !isStandalone()` — without
+  Add-to-Home-Screen on iOS, persistent storage is not granted and the
+  cache may be evicted by ITP after 7 days of disuse.
+- On user click: sequentially downloads each file via streaming
+  `ReadableStream` reader, writes each to `bikemap-data-v1`, updates
+  aggregate progress (weighted by size — the 62 MB routing graph
+  dominates ~75% of the bar).
+- Also caches `version.json` so the next launch can diff.
+- Calls `navigator.storage.persist()` (best-effort).
+- Sets the install flag and hides the modal.
+
+`src/pwa/update.js` (`checkForUpdate`):
+- Honors a `sessionStorage['bikemap-update-dismissed-until']` cooldown
+  so refreshing the tab doesn't re-show after Later.
+- Fetches fresh `version.json`, diffs per-file against the cached
+  manifest, shows the banner if anything changed.
+- "Update" runs a scoped `downloadAll()` (same code path as install)
+  for just the changed files, swaps the cached version.json, updates
+  the flag, prompts reload.
+
+`src/pwa/version.js` is the shared helper: `fetchRemoteManifest()`,
+`getCachedManifest()`, `diffManifests()`, `waitForController()`,
+`formatBytes()`, `inferContentType()`.
+
+`src/pwa/platform.js` does `isIOS()` / `isStandalone()` and stashes the
+Chrome/Edge `beforeinstallprompt` event for an optional explicit
+Install button later.
+
+### Build pipeline additions
+
+The data-refresh sequence (in CLAUDE.md's Quickstart) now ends with:
+
+```bash
+python3 scripts/build_data_manifest.py    # always last
+```
+
+This walks `public/data/` + `public/tiles/`, sha256-hashes each file
+(truncated to 16 hex chars), and emits `public/data/version.json` with
+`{ version, files: [{ url, size, gzippedSize, hash }, ...] }`. The list
+of included files is **explicit** in `TARGETS` — not a glob — so
+staging files like `contours_new.geojson` don't accidentally ship.
+
+PWA-specific build steps (one-shot or rerun-on-asset-change):
+
+```bash
+npm run build:fonts      # vendor Material Symbols woff2 + CSS into public/fonts/
+npm run build:icons      # rasterize public/icons/bikemap.svg → PNGs
+npm run build:manifest   # generate public/data/version.json
+npm run build:pwa        # all three above
+```
+
+`build:fonts` requires `curl`. `build:icons` requires
+`brew install librsvg`. Once committed, these don't need to re-run
+unless the source SVG, the font, or the data files change.
+
+### Why hand-rolled SW instead of vite-plugin-pwa
+
+PMTiles range-request handling is custom code anyway (Workbox doesn't
+do it), the version-diffing update flow is custom, and a single 180-LOC
+auditable `sw.js` is more transparent than Workbox's runtime caching
+config. The only meta the SW needs from the build is the precache
+manifest, which is a 25-line custom vite plugin.
+
+### iOS specifics
+
+- `viewport-fit=cover` in the viewport meta is required for
+  `env(safe-area-inset-*)` to return non-zero.
+- `apple-mobile-web-app-capable=yes` makes Add-to-Home-Screen launch
+  standalone (no Safari URL bar).
+- `apple-mobile-web-app-status-bar-style=default` keeps a translucent
+  status bar; the white `.install-card` extends behind it correctly.
+- The `@media (display-mode: standalone)` block in style.css adds
+  `safe-area-inset-top` padding to `#app-header` so the title doesn't
+  collide with the dynamic island, and `safe-area-inset-bottom`
+  padding to `#sheet` so the drag pill / inputs aren't under the home
+  indicator.
+
+### Vendored Material Symbols
+
+`fonts.googleapis.com` is no longer linked from `index.html`. The font
+lives in `public/fonts/material-symbols-outlined.woff2` (~311 KB
+variable font, all glyphs at opsz=24 wght=400). Sourced via
+`scripts/fetch_material_symbols.sh` which scrapes the woff2 URL from
+Google's CSS endpoint, downloads it, and writes a local `@font-face`
+declaration. Re-run the script to refresh; output is committed.
 
 ## What's intentionally out of scope (so far)
 

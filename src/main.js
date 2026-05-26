@@ -11,6 +11,36 @@ import { attachPopups } from './popups.js';
 import { initRoutingUI } from './routing/ui.js';
 import { initSheet } from './sheet.js';
 
+import { registerServiceWorker } from './pwa/register.js';
+import { ensureInstalled } from './pwa/install.js';
+import { checkForUpdate } from './pwa/update.js';
+import { initManageData } from './pwa/manage.js';
+
+// Register the SW immediately so it can intercept fetches by the time the
+// install flow starts populating the data cache.
+registerServiceWorker();
+
+// Everything below — basemap + data layers + routing + sheet wiring —
+// is gated on ensureInstalled() resolving. On the first visit that means
+// the user has clicked Download and the streaming install has completed.
+// On subsequent visits ensureInstalled() returns immediately.
+(async function boot() {
+  await ensureInstalled();
+  await initApp();
+  initManageData();  // wires Settings → Manage data buttons
+  checkForUpdate();  // silent version-only catchup; no UI side effect
+})().catch((err) => {
+  console.error('[boot] fatal:', err);
+  const errEl = document.getElementById('install-error');
+  if (errEl) {
+    errEl.textContent = `Startup failed: ${err.message}`;
+    errEl.removeAttribute('hidden');
+    document.getElementById('install-modal')?.removeAttribute('hidden');
+  }
+});
+
+async function initApp() {
+
 const protocol = new Protocol();
 maplibregl.addProtocol('pmtiles', protocol.tile);
 
@@ -193,3 +223,5 @@ function wireToggles(map) {
 if (import.meta.env.DEV) {
   window.__map = map;
 }
+
+} // end initApp()

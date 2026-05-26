@@ -1,0 +1,134 @@
+{
+  "version": "20260525-155452",
+  "generatedAt": 1779749692,
+  "totalBytes": 193315511,
+  "totalGzippedBytes": 81764630,
+  "files": [
+    {
+      "url": "./tiles/seattle.pmtiles",
+      "size": 61744822,
+      "gzippedSize": 61744822,
+      "hash": "61d98e44e9f84983"
+    },
+    {
+      "url": "./data/routing_graph.json",
+      "size": 65261328,
+      "gzippedSize": 11646110,
+      "hash": "a19293bc56e0d619"
+    },
+    {
+      "url": "./data/addr_index.json",
+      "size": 20832403,
+      "gzippedSize": 3430059,
+      "hash": "50ef5c734f476a1c"
+    },
+    {
+      "url": "./data/bike_signs.geojson",
+      "size": 11277481,
+      "gzippedSize": 876407,
+      "hash": "80594046642df9c5"
+    },
+    {
+      "url": "./data/bike_facilities.geojson",
+      "size": 6174814,
+      "gzippedSize": 472271,
+      "hash": "67cfd85327f0c78a"
+    },
+    {
+      "url": "./data/bike_plus_network.geojson",
+      "size": 4118962,
+      "gzippedSize": 643223,
+      "hash": "b3e66de483fd867c"
+    },
+    {
+      "url": "./data/bicycle_racks.geojson",
+      "size": 4132494,
+      "gzippedSize": 376784,
+      "hash": "ed8786524ea62ba2"
+    },
+    {
+      "url": "./data/multi_use_trails.geojson",
+      "size": 336647,
+      "gzippedSize": 48821,
+      "hash": "748ef4e89432bebe"
+    },
+    {
+      "url": "./data/kc_regional_trails.geojson",
+      "size": 15527,
+      "gzippedSize": 2796,
+      "hash": "f0772524c4c508cd"
+    },
+    {
+      "url": "./data/parks_restrooms.geojson",
+      "size": 187407,
+      "gzippedSize": 23306,
+      "hash": "66c700cd35904c3a"
+    },
+    {
+      "url": "./data/libraries.geojson",
+      "size": 8865,
+      "gzippedSize": 1733,
+      "hash": "8fd39b74358e9fd0"
+    },
+    {
+      "url": "./data/community_centers.geojson",
+      "size": 61653,
+      "gzippedSize": 7025,
+      "hash": "2a22a32db436b62e"
+    },
+    {
+      "url": "./data/light_rail_stations.geojson",
+      "size": 4995,
+      "gzippedSize": 799,
+      "hash": "a1d84c053993d5da"
+    },
+    {
+      "url": "./data/seattle_streets.geojson",
+      "size": 10859900,
+      "gzippedSize": 1532240,
+      "hash": "3af799eca59c6798"
+    },
+    {
+      "url": "./data/seattle_polygon.geojson",
+      "size": 16780,
+      "gzippedSize": 4392,
+      "hash": "1647912eab5cb9af"
+    },
+    {
+      "url": "./data/contours.geojson",
+      "size": 1744415,
+      "gzippedSize": 407010,
+      "hash": "219b3865648a0acc"
+    },
+    {
+      "url": "./data/crosswalks.geojson",
+      "size": 1546262,
+      "gzippedSize": 169023,
+      "hash": "7d9e6b111725b1f1"
+    },
+    {
+      "url": "./data/signals.geojson",
+      "size": 527667,
+      "gzippedSize": 31939,
+      "hash": "790a3c8924da31b2"
+    },
+    {
+      "url": "./data/beacons.geojson",
+      "size": 214202,
+      "gzippedSize": 17282,
+      "hash": "57752e480b0836a6"
+    },
+    {
+      "url": "./data/stop_signs.geojson",
+      "size": 3812136,
+      "gzippedSize": 303135,
+      "hash": "6bcf11f0d101c041"
+    },
+    {
+      "url": "./data/traffic_circles.geojson",
+      "size": 436751,
+      "gzippedSize": 25453,
+      "hash": "16ac38223bc32d7d"
+    }
+  ]
+}

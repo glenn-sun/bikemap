@@ -1,0 +1,5 @@
+/* Cancels the .clip-circle clipPath in public/icons/bikemap.svg so
+   rsvg-convert renders the full square canvas (pink corners visible).
+   Passed via --stylesheet for the square output variants
+   (apple-touch-icon + manifest 'any' + manifest 'maskable'). */
+.clip-circle { clip-path: none !important; }

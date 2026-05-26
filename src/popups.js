@@ -206,46 +206,69 @@ function clickedOnRouteLine(map, e) {
 }
 
 export function attachPopups(map) {
-  for (const layerId of CLICKABLE_LAYERS) {
-    map.on('click', layerId, (e) => {
-      // In choose-on-map mode the routing UI is consuming the next map
-      // click as an endpoint pick; do not also pop a feature popup over it.
-      if (isChoosingOnMap()) return;
-      // If the click also lands on a route line, the routing UI is
-      // handling it (promoting an alternate) — don't summon an unrelated
-      // bike-rack / restroom / etc. popup over the same pixel.
-      if (clickedOnRouteLine(map, e)) return;
-      if (!e.features || !e.features.length) return;
-      const f = e.features[0];
-      const html = formatters[layerId](f.properties);
-      if (!html || !html.trim()) return;
-      const ll = pointFromFeature(f, e.lngLat);
-      const popup = new maplibregl.Popup({
-        closeButton: true,
-        maxWidth: 'min(320px, calc(100vw - 24px))',
-      })
-        .setLngLat(ll)
-        .setHTML(`<div class="pop">${html}</div>`)
-        .addTo(map);
-      // On mobile, collapse the sheet so the popup isn't covered.
-      snapSheet('peek');
+  // ONE global click handler — not per-layer. Per-layer `map.on('click',
+  // layerId, …)` listeners fire independently, so a single click that
+  // hits multiple stacked features (a bike rack on top of a bike-facility
+  // polyline, etc.) opens one popup per layer. Instead we run a single
+  // `queryRenderedFeatures` over all clickable layers and show the
+  // top-most match only. Hover handlers below stay per-layer because
+  // cursor behavior is naturally layer-scoped.
+  map.on('click', (e) => {
+    if (isChoosingOnMap()) return;
+    // If the click also lands on a route line, the routing UI is
+    // handling it (promoting an alternate) — don't summon an unrelated
+    // bike-rack / restroom / etc. popup over the same pixel.
+    if (clickedOnRouteLine(map, e)) return;
+    const present = CLICKABLE_LAYERS.filter((id) => map.getLayer(id));
+    if (!present.length) return;
+    // queryRenderedFeatures returns features in render order, topmost
+    // first — so [0] is the layer the user visually clicked on.
+    const features = map.queryRenderedFeatures(e.point, { layers: present });
+    if (!features.length) return;
+    const f = features[0];
+    const layerId = f.layer.id;
+    const fmt = formatters[layerId];
+    if (!fmt) return;
+    const html = fmt(f.properties);
+    if (!html || !html.trim()) return;
+    const ll = pointFromFeature(f, e.lngLat);
+    const popup = new maplibregl.Popup({
+      closeButton: false,
+      maxWidth: 'min(320px, calc(100vw - 24px))',
+    })
+      .setLngLat(ll)
+      .setHTML(`<div class="pop"><div class="pop-toolbar"></div><div class="pop-body">${html}</div></div>`)
+      .addTo(map);
+    // On mobile, collapse the sheet so the popup isn't covered.
+    snapSheet('peek');
+    const toolbar = popup.getElement()?.querySelector('.pop-toolbar');
+    if (toolbar) {
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'pop-close-btn';
+      closeBtn.setAttribute('aria-label', 'Close');
+      closeBtn.title = 'Close';
+      closeBtn.innerHTML = '<span class="material-symbols-outlined">close</span>';
+      closeBtn.addEventListener('click', () => popup.remove());
+      toolbar.appendChild(closeBtn);
+
       if (POI_LAYERS.has(layerId)) {
-        const popEl = popup.getElement()?.querySelector('.pop');
-        if (popEl) {
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'pop-go-btn';
-          btn.title = 'Route here from my location';
-          btn.innerHTML = '<span class="material-symbols-outlined">directions</span>Go';
-          btn.addEventListener('click', () => {
-            const label = popupTitleFromHtml(html);
-            popup.remove();
-            routeFromMyLocationTo(ll[0], ll[1], label);
-          });
-          popEl.appendChild(btn);
-        }
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pop-go-btn';
+        btn.title = 'Route here from my location';
+        btn.innerHTML = '<span class="material-symbols-outlined">directions</span>Go';
+        btn.addEventListener('click', () => {
+          const label = popupTitleFromHtml(html);
+          popup.remove();
+          routeFromMyLocationTo(ll[0], ll[1], label);
+        });
+        toolbar.appendChild(btn);
       }
-    });
+    }
+  });
+
+  for (const layerId of CLICKABLE_LAYERS) {
     map.on('mouseenter', layerId, () => {
       if (isChoosingOnMap()) return;
       map.getCanvas().style.cursor = 'pointer';

@@ -43,6 +43,12 @@ import { snapSheet } from '../sheet.js';
 
 const GRAPH_URL = `${import.meta.env.BASE_URL}data/routing_graph.json`;
 const SIGNS_URL = `${import.meta.env.BASE_URL}data/bike_signs.geojson`;
+const BIKE_RACKS_URL = `${import.meta.env.BASE_URL}data/bicycle_racks.geojson`;
+
+// Distance thresholds for the destination bike-parking section that
+// renders between the route summary and the turn-by-turn steps.
+const RACK_GREEN_FT  = 300;
+const RACK_YELLOW_FT = 1000;
 
 const ROUTE_SOURCE  = 'route';
 const ALT_SOURCE    = 'route-alts';
@@ -89,6 +95,7 @@ export function initRoutingUI(map, vm = null) {
     vm,                  // visibility manager (for graph-debug refresh)
     graph: null,
     signs: null,
+    bikeRacks: null,
     startSpec: null,
     endSpec: null,
     startLabel: '',
@@ -151,9 +158,11 @@ export function initRoutingUI(map, vm = null) {
   Promise.all([
     loadGraph(GRAPH_URL),
     fetch(SIGNS_URL).then((r) => r.json()),
-  ]).then(([graph, signs]) => {
+    fetch(BIKE_RACKS_URL).then((r) => r.json()),
+  ]).then(([graph, signs, bikeRacks]) => {
     state.graph = graph;
     state.signs = signs;
+    state.bikeRacks = bikeRacks;
     addGraphDebugLayers(map, graph);
     // The visibility manager bound graph-debug to a checkbox before the
     // layers existed; apply now so the checkbox state takes effect.
@@ -1110,6 +1119,103 @@ function elevationBlockHtml(state, route, vbWidth = 320) {
     </div>`;
 }
 
+// ---------- destination bike-parking block ----------
+//
+// Renders a small "P" badge + summary right above the turn-by-turn step
+// list. The badge color is a traffic-light tier based on the closest
+// public bike rack (from the bicycle_racks SDOT layer) to the route's
+// final coordinate:
+//   green  — at least one rack within RACK_GREEN_FT
+//   yellow — closest rack within RACK_YELLOW_FT (gives bearing + dist)
+//   red    — no rack within RACK_YELLOW_FT
+//
+// Uses haversine distance on raw lon/lat. The bike-rack source is loaded
+// once into state at app boot (same Promise.all as the graph + signs).
+
+const FT_PER_METER_RACK = 3.28084;
+const EARTH_RADIUS_M = 6371000;
+
+function haversineFtRack(lon1, lat1, lon2, lat2) {
+  const toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad;
+  const dLon = (lon2 - lon1) * toRad;
+  const a = Math.sin(dLat / 2) ** 2
+          + Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad)
+            * Math.sin(dLon / 2) ** 2;
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(a)) * FT_PER_METER_RACK;
+}
+
+// Bearing FROM (lon1,lat1) TO (lon2,lat2), degrees clockwise from north.
+function bearingDegRack(lon1, lat1, lon2, lat2) {
+  const toRad = Math.PI / 180;
+  const φ1 = lat1 * toRad, φ2 = lat2 * toRad;
+  const Δλ = (lon2 - lon1) * toRad;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2)
+          - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  let θ = Math.atan2(y, x) * 180 / Math.PI;
+  return (θ + 360) % 360;
+}
+
+function compass8(bearingDeg) {
+  // 8-sector compass, 45° wide each, centered on the cardinal.
+  const dirs = ['north', 'northeast', 'east', 'southeast',
+                'south', 'southwest', 'west', 'northwest'];
+  const idx = Math.floor(((bearingDeg + 22.5) % 360) / 45);
+  return dirs[idx];
+}
+
+function bikeRackInfoForDestination(state, destLon, destLat) {
+  const feats = state.bikeRacks?.features;
+  if (!feats || !feats.length) return null;
+  // Quick lat/lon bbox prefilter — 1000 ft ~ 305 m. At Seattle's
+  // latitude 1° lat ≈ 364,000 ft, 1° lon ≈ 247,000 ft. Use a generous
+  // 1° / 200 ≈ 1,800 ft window (well past RACK_YELLOW_FT) so we never
+  // miss the nearest rack to a haversine roundoff edge case.
+  const latRange = RACK_YELLOW_FT / 364000;
+  const lonRange = RACK_YELLOW_FT / 247000;
+  let closestFt = Infinity;
+  let closestLon = 0, closestLat = 0;
+  let withinGreen = 0;
+  for (const f of feats) {
+    const g = f.geometry;
+    if (!g || g.type !== 'Point') continue;
+    const [lon, lat] = g.coordinates;
+    if (Math.abs(lat - destLat) > latRange) continue;
+    if (Math.abs(lon - destLon) > lonRange) continue;
+    const d = haversineFtRack(destLon, destLat, lon, lat);
+    if (d <= RACK_GREEN_FT) withinGreen++;
+    if (d < closestFt) { closestFt = d; closestLon = lon; closestLat = lat; }
+  }
+  if (withinGreen > 0) return { tier: 'green', count: withinGreen };
+  if (closestFt <= RACK_YELLOW_FT) {
+    return {
+      tier: 'yellow',
+      distanceFt: Math.round(closestFt),
+      direction: compass8(bearingDegRack(destLon, destLat, closestLon, closestLat)),
+    };
+  }
+  return { tier: 'red' };
+}
+
+function bikeRackBlockHtml(info) {
+  if (!info) return '';
+  let msg = '';
+  if (info.tier === 'green') {
+    const noun = info.count === 1 ? 'public bike rack' : 'public bike racks';
+    msg = `There ${info.count === 1 ? 'is' : 'are'} ${info.count} ${noun} within ${RACK_GREEN_FT} ft of the destination.`;
+  } else if (info.tier === 'yellow') {
+    msg = `The closest public bike rack is ${info.distanceFt} ft to the ${info.direction} of the destination.`;
+  } else {
+    msg = `No public bike racks available within ${RACK_YELLOW_FT} ft of destination.`;
+  }
+  return `
+    <div class="route-rack route-rack-${info.tier}">
+      <div class="route-rack-badge" aria-hidden="true">P</div>
+      <div class="route-rack-msg">${escHtml(msg)}</div>
+    </div>`;
+}
+
 function renderDirections(state, info) {
   // Tab strip — only when >1 route is showing. Active tab = currently
   // primary route. Clicking a tab swaps which route is primary (same as
@@ -1152,6 +1258,14 @@ function renderDirections(state, info) {
     </div>
     ${elevHtml}`;
 
+  // Destination bike-parking block — green/yellow/red P badge + message
+  // based on the closest public bike rack to the route end.
+  let rackHtml = '';
+  if (activeRoute && activeRoute.fullGeom?.length) {
+    const end = activeRoute.fullGeom[activeRoute.fullGeom.length - 1];
+    rackHtml = bikeRackBlockHtml(bikeRackInfoForDestination(state, end[0], end[1]));
+  }
+
   const stepsHtml = info.steps.map((s) => {
     const dist = s.distanceFt > 0 ? formatDistance(s.distanceFt) : '';
     const annots = s.annotations.length
@@ -1165,7 +1279,7 @@ function renderDirections(state, info) {
       </li>`;
   }).join('');
 
-  setPanel(state, tabsHtml + summary + `<ol class="route-steps">${stepsHtml}</ol>`);
+  setPanel(state, tabsHtml + summary + rackHtml + `<ol class="route-steps">${stepsHtml}</ol>`);
 
   // Wire tab clicks to activate.
   if (tabsHtml) {
@@ -1991,11 +2105,12 @@ function saveDebugEnabledToStorage(enabled) {
   try { localStorage.setItem(LS_DEBUG_ENABLED, enabled ? 'true' : 'false'); } catch {}
 }
 function loadSidewalksEnabledFromStorage() {
+  // Default ON for fresh users; respect an explicit prior off-toggle.
   try {
     const v = localStorage.getItem(LS_SIDEWALKS_ENABLED);
-    if (v === 'true') return true;
+    if (v === 'false') return false;
   } catch {}
-  return false;
+  return true;
 }
 function saveSidewalksEnabledToStorage(enabled) {
   try { localStorage.setItem(LS_SIDEWALKS_ENABLED, enabled ? 'true' : 'false'); } catch {}

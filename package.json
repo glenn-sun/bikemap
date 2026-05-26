@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:icons": "bash scripts/build_pwa_assets.sh",
+    "build:fonts": "bash scripts/fetch_material_symbols.sh",
+    "build:manifest": "python3 scripts/build_data_manifest.py",
+    "build:pwa": "npm run build:fonts && npm run build:icons && npm run build:manifest"
   },
   "dependencies": {
     "@protomaps/basemaps": "^5.7.2",

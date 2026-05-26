@@ -2,17 +2,48 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Open Bike Map Seattle</title>
     <link rel="stylesheet" href="/src/style.css" />
-    <!-- Google Material Symbols (variable font; one HTTP request).
-         opsz=24 weight=400 fill=0 grad=0 — neutral default for chrome icons. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=block" />
+    <!-- Material Symbols vendored locally (see scripts/fetch_material_symbols.sh).
+         Eliminates the Google Fonts network dependency so the PWA can run
+         fully offline. -->
+    <link rel="stylesheet" href="./fonts/material-symbols-outlined.css" />
+
+    <!-- ============ PWA wiring ============ -->
+    <meta name="theme-color" content="#e91e63" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./icons/icon-circle-32.png" />
+    <link rel="apple-touch-icon" href="./icons/icon-180.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Bike Map" />
   </head>
   <body>
+    <!-- ============ PWA install modal (blocking, first visit only) ============
+         Shown by src/pwa/install.js when there is no installed-version flag
+         in localStorage. The CTA streams every data file into the SW data
+         cache and shows aggregate progress, then hides itself and lets
+         src/main.js proceed to map init. -->
+    <div id="install-modal" hidden>
+      <div class="install-card">
+        <img src="./icons/icon-circle-192.png" alt="" class="install-icon" width="96" height="96" />
+        <h2>Open Bike Map Seattle</h2>
+        <p>This app runs offline and requires <strong id="install-size">…</strong> of data.</p>
+        <button id="install-go" type="button" class="install-cta">Download now</button>
+        <div id="install-progress-wrap" hidden>
+          <div id="install-progress-bar"><div id="install-progress-fill"></div></div>
+          <div id="install-progress-text">0%</div>
+        </div>
+        <div id="install-error" hidden></div>
+        <details id="ios-hint" hidden>
+          <summary>On iPhone? Tap Share → Add to Home Screen first.</summary>
+          <p>For full offline support, install this site to your home screen via Safari's Share menu, then reopen from the new icon.</p>
+        </details>
+      </div>
+    </div>
+
     <div id="map"></div>
 
     <!-- ============ Choose-on-map banner (hidden by default) ============ -->
@@ -28,6 +59,7 @@
          pill at top-left. Mobile (≤719 px): fixed full-width bar at
          top of viewport. -->
     <header id="app-header">
+      <img class="app-logo" src="./icons/icon-circle-192.png" alt="" width="28" height="28" />
       <h1 class="app-title">Open Bike Map Seattle</h1>
       <div class="app-header-actions">
         <button id="layers-fab" type="button" aria-label="Layers" title="Layers">
@@ -92,7 +124,7 @@
             <label for="preset-custom" id="preset-custom-label" title="Tune the sliders in Settings">Custom</label>
           </div>
           <label class="sidewalks-toggle" for="toggle-sidewalks">
-            <input type="checkbox" id="toggle-sidewalks" />
+            <input type="checkbox" id="toggle-sidewalks" checked />
             <span>Enable sidewalks</span>
             <span class="info-tip" tabindex="0" role="button"
                   aria-label="Sidewalk routing details"
@@ -125,12 +157,12 @@
         <label><input type="checkbox" id="toggle-bbl" checked /> Buffered bike lanes</label>
         <label><input type="checkbox" id="toggle-bl" checked /> Standard bike lanes</label>
         <label><input type="checkbox" id="toggle-sharrows" checked /> Sharrows / climbing</label>
-        <label><input type="checkbox" id="toggle-planned" /> Planned (gray dotted)</label>
+        <label><input type="checkbox" id="toggle-planned" /> Planned</label>
         <label><input type="checkbox" id="toggle-construction" /> Under construction</label>
       </section>
       <section class="panel-section">
         <h3>Terrain</h3>
-        <label><input type="checkbox" id="toggle-contours" /> Elevation contour lines</label>
+        <label><input type="checkbox" id="toggle-contours" checked /> Elevation contour lines</label>
       </section>
       <section class="panel-section">
         <h3>Points</h3>
@@ -209,11 +241,42 @@
       </section>
 
       <section class="panel-section">
+        <h3>Manage data</h3>
+        <div class="manage-data-actions">
+          <button id="settings-update-btn" type="button" class="manage-data-btn" disabled>Checking for updates…</button>
+          <button id="settings-delete-btn" type="button" class="manage-data-btn manage-data-btn-danger">Delete data</button>
+        </div>
+      </section>
+
+      <section class="panel-section">
+        <h3>About</h3>
+        <div class="brand-links">
+          <a class="brand-link brand-link-kofi"
+             href="https://ko-fi.com/glennsun"
+             target="_blank" rel="noopener noreferrer">
+            <img src="./icons/kofi-symbol.svg" alt="" class="brand-link-logo" />
+            <span>Support me on Ko-fi</span>
+          </a>
+          <a class="brand-link brand-link-github"
+             href="https://github.com/glenn-sun/bikemap"
+             target="_blank" rel="noopener noreferrer">
+            <img src="./icons/github-mark.svg" alt="" class="brand-link-logo" />
+            <span>View source on GitHub</span>
+          </a>
+        </div>
+      </section>
+
+      <section class="panel-section">
         <h3>Routing debug</h3>
         <label class="settings-toggle" for="settings-debug-enabled">
           <input type="checkbox" id="settings-debug-enabled" />
           <span>Enable routing debug layers</span>
         </label>
+      </section>
+
+      <section class="panel-section">
+        <h3>Disclaimer</h3>
+        <p class="settings-disclaimer">Data inaccuracies may exist. Follow all signs and local laws while riding. Open Bike Map Seattle provides best effort reporting of open data and makes no guarantees for safety.</p>
       </section>
 
       <section class="panel-section">

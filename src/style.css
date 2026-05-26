@@ -127,10 +127,31 @@ body {
 
 /* ============ Popups (per-layer) ============ */
 
+/* MapLibre sets a `font: 12px/20px Helvetica Neue, Arial, ...` shorthand
+ * on `.maplibregl-map`; the popup inherits it. Override font-family
+ * explicitly with the same stack as `body` so popups read like the
+ * rest of the app. */
+.maplibregl-popup-content {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  padding: 10px;
+  border-radius: 6px;
+}
+
 .pop {
   font-size: 13px;
   line-height: 1.4;
   color: #222;
+}
+/* Toolbar row at the top of every popup: close button (left), optional
+ * Go button (right). Reserves a minimum height so single-button popups
+ * still have a visually consistent header row. */
+.pop-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  min-height: 22px;
 }
 .pop-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
 .pop-row { margin-top: 2px; }
@@ -138,13 +159,26 @@ body {
 .pop a { color: #1e88e5; text-decoration: none; }
 .pop a:hover { text-decoration: underline; }
 
+/* Custom Material-icon close button (replaces maplibre's default ✕),
+ * styled like #settings-close / #layers-panel-close but slightly smaller. */
+.pop-close-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  padding: 2px;
+  display: inline-flex;
+}
+.pop-close-btn:hover { color: #222; }
+.pop-close-btn .material-symbols-outlined { font-size: 18px; }
+
 /* "Go" button shown in POI popups — routes from the user's current
- * location to the popup's feature. */
+ * location to the popup's feature. Lives in the top-right of the
+ * toolbar opposite the close button. */
 .pop-go-btn {
-  margin-top: 8px;
   font-size: 13px;
   font-weight: 600;
-  padding: 5px 12px;
+  padding: 4px 10px;
   border: none;
   background: #e91e63;
   color: #ffffff;
@@ -253,6 +287,12 @@ body {
   margin: 0;
   padding: 6px 10px;
 }
+.app-logo {
+  width: 28px;
+  height: 28px;
+  display: block;
+  flex-shrink: 0;
+}
 .app-title {
   margin: 0;
   font-size: 16px;
@@ -260,6 +300,13 @@ body {
   letter-spacing: 0.01em;
   color: #222;
   line-height: 1.2;
+  /* Take whatever horizontal room the title bar can spare; .app-logo and
+   * .app-header-actions are fixed-width so the title gets the remainder. */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .app-header-actions {
   display: flex;
@@ -755,7 +802,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-bottom: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid #eee;
 }
@@ -831,6 +877,43 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   pointer-events: none;
 }
+
+/* ============ Destination bike-parking block ============ */
+/* Sits between the elevation chart and the turn-by-turn step list.
+ * A "P" badge in a green / yellow / red circle communicates how easy
+ * it is to lock up at the destination; the message gives the count
+ * (green) or distance + direction (yellow) or the bad news (red). */
+.route-rack {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+  font-size: 13px;
+  color: #333;
+}
+/* Same dimensions as .route-step::before / .route-step-marker so the
+ * message text aligns horizontally with the step instructions below. */
+.route-rack-badge {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 12px;
+  color: #ffffff;
+  line-height: 1;
+}
+.route-rack-green  .route-rack-badge { background: #43a047; }
+.route-rack-yellow .route-rack-badge { background: #f9a825; }
+.route-rack-red    .route-rack-badge { background: #e53935; }
+.route-rack-msg { flex: 1 1 auto; }
 
 .route-steps {
   margin: 0; 
@@ -1125,5 +1208,199 @@ body {
   #choose-on-map-banner {
     top: 56px;          /* below the title bar */
     z-index: 5;
+  }
+}
+
+/* ============ PWA: install modal + update banner + standalone safe-area ============ */
+
+/* Install modal — blocking, fullscreen, shown until first install completes.
+   The [hidden] override is REQUIRED — the id-selector display:grid below
+   would otherwise outrank the UA stylesheet's [hidden]{display:none}. */
+#install-modal[hidden] { display: none !important; }
+
+#install-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(255, 255, 255, 0.98);
+  display: grid;
+  place-items: center;
+  padding: calc(env(safe-area-inset-top) + 24px) 24px calc(env(safe-area-inset-bottom) + 24px);
+}
+.install-card {
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.18);
+  padding: 28px 28px 24px;
+  max-width: 420px;
+  width: 100%;
+  text-align: center;
+  font-size: 14px;
+  color: #222;
+}
+.install-icon {
+  width: 96px;
+  height: 96px;
+  /* The PNG is a circle with transparent corners — match the box bounds
+   * so the drop shadow follows the circle rather than the rounded-square
+   * envelope. */
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.install-card h2 {
+  margin: 16px 0 8px;
+  font-size: 22px;
+  font-weight: 600;
+}
+.install-card p {
+  margin: 0 0 16px;
+  color: #444;
+  line-height: 1.45;
+}
+.install-cta {
+  background: #e91e63;
+  color: #fff;
+  border: none;
+  padding: 12px 28px;
+  font-size: 15px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-top: 4px;
+  font-family: inherit;
+}
+.install-cta:hover { background: #c2185b; }
+.install-cta:disabled { opacity: 0.7; cursor: progress; }
+#install-progress-wrap { margin-top: 20px; }
+#install-progress-bar {
+  height: 8px;
+  background: #f1f1f1;
+  border-radius: 4px;
+  overflow: hidden;
+}
+#install-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: #e91e63;
+  transition: width 0.2s ease-out;
+}
+#install-progress-text {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #666;
+  font-variant-numeric: tabular-nums;
+}
+#install-error {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fee;
+  color: #b00;
+  font-size: 13px;
+  text-align: left;
+}
+#ios-hint {
+  margin-top: 20px;
+  text-align: left;
+  font-size: 13px;
+  color: #555;
+}
+#ios-hint summary {
+  cursor: pointer;
+  padding: 6px 0;
+  font-weight: 500;
+}
+#ios-hint p {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #666;
+}
+
+/* Settings → Manage data: stacked full-width buttons. */
+.manage-data-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+.manage-data-btn {
+  background: #e91e63;
+  color: #fff;
+  border: none;
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: center;
+}
+.manage-data-btn:hover { background: #c2185b; }
+.manage-data-btn:disabled {
+  background: #e5e5e5;
+  color: #888;
+  cursor: default;
+}
+.manage-data-btn-danger {
+  background: #fff;
+  color: #c2185b;
+  border: 1px solid #c2185b;
+}
+.manage-data-btn-danger:hover {
+  background: #fce4ec;
+  color: #c2185b;
+}
+
+.settings-disclaimer {
+  margin: 0;
+  font-size: 13px;
+  color: #555;
+  line-height: 1.45;
+}
+
+/* Settings → About: brand-styled external links with each company's logo
+   in its own brand color. Kept full-width and stacked so they read as
+   parallel actions alongside the Manage data buttons above. */
+.brand-links {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.brand-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 14px;
+  font-family: inherit;
+  color: #fff;
+}
+.brand-link-logo {
+  width: 22px;
+  height: 22px;
+  display: block;
+  flex-shrink: 0;
+}
+.brand-link-kofi {
+  background: #ff5e5b;       /* Ko-fi pink/red */
+}
+.brand-link-kofi:hover { background: #e94542; }
+.brand-link-github {
+  background: #24292f;       /* GitHub neutral dark (same hue as github.com primer) */
+}
+.brand-link-github:hover { background: #1c2025; }
+
+/* Standalone display-mode (installed PWA): clear iOS dynamic island and
+   keep the bottom sheet's drag pill out from under the home indicator. */
+@media all and (display-mode: standalone) {
+  #app-header {
+    padding-top: calc(env(safe-area-inset-top) + 6px);
+  }
+  #sheet {
+    padding-bottom: env(safe-area-inset-bottom);
   }
 }
