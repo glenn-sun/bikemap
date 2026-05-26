@@ -1,17 +1,20 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!--
-  viewBox shrunk from "0 -960 2000 2000" to "200 -760 1600 1600": tighter
-  crop on the same content (~1.25x zoom-in around the bike+text cluster).
-  The clipPath in defs plus the .clip-circle class on the content group
-  applies a circular crop by default; build_pwa_assets.sh passes
-  the no-clip.css stylesheet when rendering the square-canvas variants
-  (apple-touch, manifest any, manifest maskable) so those outputs still
-  fill the pink background to the corners.
+  viewBox is "100 -860 1800 1800" — looser crop than the prior
+  "200 -760 1600 1600" so the bike + OBMS cluster occupies ~89% of the
+  canvas (~11% smaller content) and the installed home-screen icon
+  doesn't look tight. The clipPath circle (cx=1000, cy=40, r=900) is
+  sized to match the new canvas so circle-render outputs still fill
+  edge-to-edge. The .clip-circle class on the content group applies a
+  circular crop by default; build_pwa_assets.sh passes the no-clip.css
+  stylesheet when rendering the square-canvas variants (apple-touch,
+  manifest any, manifest maskable) so those outputs fill the pink
+  background to the corners.
 -->
 
 <svg
    height="50"
-   viewBox="200 -760 1600 1600"
+   viewBox="100 -860 1800 1800"
    width="50"
    fill="#1f1f1f"
    version="1.1"
@@ -25,7 +28,7 @@
       <circle
          cx="1000"
          cy="40"
-         r="800"
+         r="900"
          id="circle1" />
     </clipPath>
   </defs>

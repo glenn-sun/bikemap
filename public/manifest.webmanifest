@@ -1,6 +1,6 @@
 {
-  "name": "Open Bike Map Seattle",
-  "short_name": "Bike Map",
+  "name": "OBMS",
+  "short_name": "OBMS",
   "description": "Offline-capable bike map and routing for Seattle.",
   "start_url": "./",
   "scope": "./",

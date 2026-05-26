@@ -5,10 +5,25 @@
 //   peek — Start/End inputs + ride-style picker visible
 //   full — scrollable full directions; leaves a small map strip up top
 //
-// Implementation: pointer events only (handles touch + mouse + stylus).
-// Velocity-biased snap on release. Pure tap on the drag bar toggles
-// peek ↔ full. Inner scroll inside #left-stack wins over sheet drag when
-// scrollTop > 0.
+// Two input surfaces are wired:
+//   1. The pill bar (#sheet-handle-bar) — pointer events. Drag moves the
+//      sheet; pure tap toggles peek↔full.
+//   2. The scrollable content area (#left-stack) — touch events with
+//      passive:false so we can call preventDefault() to override native
+//      scroll when we want to drag the sheet instead. The arbitration
+//      rules at touchstart-decided are:
+//        - peek state, any vertical swipe → drag the sheet (peek means
+//          there's no useful content scrolling — the user's gesture
+//          means "expand")
+//        - full state, swiping down with the nearest scrollable
+//          ancestor's scrollTop === 0 → drag the sheet down
+//        - full state, swiping up OR scrollTop > 0 → native scroll
+//      Taps on content (no movement) never toggle the sheet — only the
+//      pill does that.
+//
+// Implementation: pointer events for the pill (handles touch + mouse +
+// stylus); touch events for the content (we need touchmove with passive:
+// false to coexist with native scroll). Velocity-biased snap on release.
 //
 // The sheet uses `position: fixed; height: 100vh; transform: translateY()`
 // to slide vertically. To prevent the bottom of long step lists from
@@ -45,6 +60,11 @@ const PEEK_HEIGHT = 148;
 // from appearing to jump down when the iOS keyboard dismisses and
 // vh grows.
 const FULL_TOP_OFFSET = 44;
+
+// Minimum gesture distance before a content swipe is interpreted as a
+// drag intent. Below this we wait — short enough to feel responsive,
+// long enough that horizontal text-selection wiggles don't claim.
+const DRAG_THRESHOLD_PX = 4;
 
 // Resolved at init time. Heights are pixels from the *bottom* of the
 // viewport — i.e. the height of the visible sheet at each snap.
@@ -106,6 +126,24 @@ function isMobile() {
   return window.matchMedia('(max-width: 719px)').matches;
 }
 
+// Walk up from the touch target to find the nearest ancestor (within
+// the sheet) that's actually scrolling its own content. We need this
+// because the directions panel sometimes becomes its own scroll
+// container (`overflow-y: auto` + content overflow) while the routing
+// panel doesn't scroll at all. Picking the wrong element's scrollTop
+// would mis-decide the drag/scroll handoff at the top of the list.
+function nearestScrollAncestor(el) {
+  let cur = el;
+  while (cur && cur !== sheetEl && cur !== document.body) {
+    if (cur.scrollHeight - cur.clientHeight > 1) {
+      const oy = window.getComputedStyle(cur).overflowY;
+      if (oy === 'auto' || oy === 'scroll') return cur;
+    }
+    cur = cur.parentElement;
+  }
+  return scrollEl;
+}
+
 export function snapSheet(name) {
   if (!isMobile()) return;
   // Legacy callers may still pass 'half'; map to 'full'.
@@ -142,7 +180,8 @@ export function initSheet() {
   mq.addEventListener?.('change', activate);
   window.addEventListener('resize', activate);
 
-  // Drag state.
+  // ============ Pill drag (drag + tap-toggle) ============
+
   let dragging = false;
   let startY = 0;
   let startVisible = 0;
@@ -175,7 +214,7 @@ export function initSheet() {
     velocity = dy / dt;
     lastY = y;
     lastT = now;
-    if (Math.abs(y - startY) > 4) moved = true;
+    if (Math.abs(y - startY) > DRAG_THRESHOLD_PX) moved = true;
     const totalDy = y - startY;
     let visible = startVisible - totalDy;
     const minV = snapPx.peek;
@@ -186,7 +225,7 @@ export function initSheet() {
     sheetEl.style.transform = `translateY(${vh - visible}px)`;
   };
 
-  const onPointerUp = (e) => {
+  const onPointerUp = () => {
     if (!dragging) return;
     dragging = false;
     try { headerEl.releasePointerCapture?.(pointerId); } catch {}
@@ -207,17 +246,114 @@ export function initSheet() {
     applySnap(snap, { animate: true });
   };
 
-  // Drag is intentionally limited to the pill handle ONLY — taps on
-  // the sheet content (dropdown rows, inputs, buttons, step list)
-  // must not be interpreted as sheet gestures. Previously the inner
-  // #left-stack also received pointer events, which made a tap on a
-  // dropdown row register as a "tap with no move" → toggle peek↔full
-  // (visible bug: tapping "Choose on map" snapped the sheet to full
-  // immediately, because the tap-toggle fired right after
-  // beginChooseOnMap's snapSheet('peek')). The pill is the
-  // single source of truth for sheet gestures.
+  // Pill listeners (drag is intentionally limited to the pill so a tap
+  // anywhere else doesn't get interpreted as a tap-toggle gesture).
   headerEl.addEventListener('pointerdown', onPointerDown);
   headerEl.addEventListener('pointermove', onPointerMove);
   headerEl.addEventListener('pointerup', onPointerUp);
   headerEl.addEventListener('pointercancel', onPointerUp);
+
+  // ============ Content drag (touch only — coexists with native scroll) ============
+  //
+  // Listen on the scroll container with touchmove { passive: false } so
+  // we can preventDefault and override native scrolling when the gesture
+  // should drag the sheet instead. The `claimed` decision is taken once
+  // per gesture (at the first move past DRAG_THRESHOLD_PX) and not
+  // revisited — switching mid-gesture would feel unpredictable and the
+  // browser may have already started scrolling.
+
+  let touch = null;
+
+  const onTouchStart = (e) => {
+    if (!isMobile()) return;
+    if (e.touches.length !== 1) { touch = null; return; }
+    const t = e.touches[0];
+    const scroller = nearestScrollAncestor(e.target);
+    touch = {
+      claimed: null,
+      startX: t.clientX,
+      startY: t.clientY,
+      startVisible: snapPx[current],
+      startScrollTop: scroller ? scroller.scrollTop : 0,
+      scroller,
+      lastY: t.clientY,
+      lastT: performance.now(),
+      velocity: 0,
+    };
+  };
+
+  const onTouchMove = (e) => {
+    if (!touch || !isMobile()) return;
+    const t = e.touches[0];
+    const dy = t.clientY - touch.startY;
+    const dx = t.clientX - touch.startX;
+    const now = performance.now();
+    const dt = Math.max(1, now - touch.lastT);
+    touch.velocity = (t.clientY - touch.lastY) / dt;
+    touch.lastY = t.clientY;
+    touch.lastT = now;
+
+    if (touch.claimed === null) {
+      if (Math.abs(dy) < DRAG_THRESHOLD_PX && Math.abs(dx) < DRAG_THRESHOLD_PX) return;
+      // Predominantly horizontal swipe → don't interfere (text selection,
+      // horizontal scrolling, etc.).
+      if (Math.abs(dx) > Math.abs(dy)) {
+        touch.claimed = 'scroll';
+        return;
+      }
+      const goingDown = dy > 0;
+      if (current === 'peek') {
+        // At peek any vertical swipe drags the sheet — the user's
+        // intent is "expand" (or, less commonly, rubber-band the
+        // closed boundary).
+        touch.claimed = 'sheet';
+      } else if (current === 'full') {
+        // At full, going UP is always a scroll. Going DOWN drags the
+        // sheet only when the scroll container is already at the top
+        // (otherwise scroll back up first, then drag once at the top).
+        if (goingDown && touch.startScrollTop <= 0) {
+          touch.claimed = 'sheet';
+        } else {
+          touch.claimed = 'scroll';
+        }
+      } else {
+        touch.claimed = 'scroll';
+      }
+    }
+
+    if (touch.claimed === 'sheet') {
+      e.preventDefault();
+      let visible = touch.startVisible - dy;
+      const minV = snapPx.peek;
+      const maxV = snapPx.full;
+      if (visible < minV) visible = minV + (visible - minV) * 0.3;
+      if (visible > maxV) visible = maxV + (visible - maxV) * 0.3;
+      const vh = window.innerHeight || 800;
+      sheetEl.style.transform = `translateY(${vh - visible}px)`;
+      sheetEl.classList.add('dragging');
+    }
+  };
+
+  const onTouchEnd = () => {
+    if (!touch) return;
+    const wasSheet = touch.claimed === 'sheet';
+    const v = touch.velocity;
+    touch = null;
+    if (!wasSheet) return;
+    sheetEl.classList.remove('dragging');
+    const vh = window.innerHeight || 800;
+    const m = (sheetEl.style.transform || '').match(/translateY\(([-\d.]+)px\)/);
+    const ty = m ? Number(m[1]) : vh - snapPx[current];
+    const visible = vh - ty;
+    const snap = nearestSnap(visible, v);
+    applySnap(snap, { animate: true });
+  };
+
+  // touchstart is read-only — passive is fine and faster.
+  sheetEl.addEventListener('touchstart', onTouchStart, { passive: true });
+  // touchmove must be non-passive so we can preventDefault to take over
+  // from native scroll when claiming the gesture for the sheet.
+  sheetEl.addEventListener('touchmove', onTouchMove, { passive: false });
+  sheetEl.addEventListener('touchend', onTouchEnd);
+  sheetEl.addEventListener('touchcancel', onTouchEnd);
 }

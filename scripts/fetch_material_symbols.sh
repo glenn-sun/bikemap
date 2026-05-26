@@ -22,6 +22,12 @@ fi
 echo "Downloading $WOFF2_URL"
 curl -fsSL "$WOFF2_URL" -o public/fonts/material-symbols-outlined.woff2
 
+# Ship the Apache 2.0 license alongside the woff2 — Apache 2.0 requires
+# the LICENSE file to travel with redistributed binaries.
+echo "Downloading Material Symbols Apache 2.0 license"
+curl -fsSL 'https://raw.githubusercontent.com/google/material-design-icons/master/LICENSE' \
+  -o public/fonts/material-symbols-LICENSE.txt
+
 cat > public/fonts/material-symbols-outlined.css <<'EOF'
 @font-face {
   font-family: 'Material Symbols Outlined';

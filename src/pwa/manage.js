@@ -6,6 +6,13 @@
 
 import { getUpdateStatus, applyUpdate, deleteAllData } from './update.js';
 import { formatBytes } from './version.js';
+import {
+  isIOS,
+  isStandalone,
+  hasDeferredInstallPrompt,
+  triggerInstallPrompt,
+  onInstallPromptChange,
+} from './platform.js';
 
 const CONFIRM_MSG =
   'Delete all downloaded map data?\n\n' +
@@ -18,9 +25,15 @@ export function initManageData() {
   const deleteBtn = document.getElementById('settings-delete-btn');
   if (!openBtn || !updateBtn || !deleteBtn) return;
 
+  wireInstallButton();
+
   openBtn.addEventListener('click', () => {
     // Fire-and-forget; the button shows "Checking…" until the promise lands.
     refreshUpdateButton();
+    // Re-evaluate install affordance every time the dialog opens — install
+    // state can change (user installed via URL-bar icon, or the deferred
+    // prompt arrived after first render).
+    syncInstallButton();
   });
 
   deleteBtn.addEventListener('click', async () => {
@@ -83,6 +96,64 @@ async function refreshUpdateButton() {
       }
     },
   });
+}
+
+// Show / hide / wire the Install app button. Chrome/Edge get a real
+// `.prompt()` call (only possible while the user-gesture chain is alive,
+// so we call it directly in the click handler). iOS users get a short
+// instruction line explaining the Share → Add to Home Screen flow,
+// since Safari doesn't expose a programmatic install API.
+const IOS_INSTALL_HINT =
+  'In Safari, tap the Share button, then "Add to Home Screen".';
+
+function wireInstallButton() {
+  const btn = document.getElementById('settings-install-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (hasDeferredInstallPrompt()) {
+      btn.disabled = true;
+      const prior = btn.textContent;
+      btn.textContent = 'Opening…';
+      try { await triggerInstallPrompt(); } catch {}
+      btn.disabled = false;
+      btn.textContent = prior;
+      syncInstallButton();
+    } else if (isIOS() && !isStandalone()) {
+      alert(IOS_INSTALL_HINT);
+    }
+  });
+  // Re-sync if the deferred prompt arrives or clears (user installs
+  // outside our flow, e.g. via the URL-bar icon).
+  onInstallPromptChange(syncInstallButton);
+  syncInstallButton();
+}
+
+function syncInstallButton() {
+  const btn = document.getElementById('settings-install-btn');
+  const hint = document.getElementById('settings-install-hint');
+  if (!btn) return;
+  if (isStandalone()) {
+    btn.setAttribute('hidden', '');
+    hint?.setAttribute('hidden', '');
+    return;
+  }
+  if (hasDeferredInstallPrompt()) {
+    btn.removeAttribute('hidden');
+    btn.textContent = 'Install app';
+    hint?.setAttribute('hidden', '');
+    return;
+  }
+  if (isIOS()) {
+    btn.removeAttribute('hidden');
+    btn.textContent = 'How to install on iPhone';
+    if (hint) {
+      hint.textContent = IOS_INSTALL_HINT;
+      hint.removeAttribute('hidden');
+    }
+    return;
+  }
+  btn.setAttribute('hidden', '');
+  hint?.setAttribute('hidden', '');
 }
 
 // Atomically swap the button's click handler. Uses a `_pwaHandler` slot

@@ -15,7 +15,13 @@ import {
   inferContentType,
   versionUrl,
 } from './version.js';
-import { isIOS, isStandalone } from './platform.js';
+import {
+  isIOS,
+  isStandalone,
+  hasDeferredInstallPrompt,
+  triggerInstallPrompt,
+  onInstallPromptChange,
+} from './platform.js';
 
 export async function ensureInstalled() {
   const existing = localStorage.getItem(INSTALL_FLAG);
@@ -76,6 +82,7 @@ function runInstallModal(manifest) {
           }
         });
         await cacheManifest(manifest);
+        await maybeShowInstallStep(modal);
         modal.setAttribute('hidden', '');
         resolve();
       } catch (err) {
@@ -88,6 +95,56 @@ function runInstallModal(manifest) {
         // Don't reject — let the user retry by clicking the CTA again.
       }
     }, { once: false });
+  });
+}
+
+// After the data download finishes, optionally show a second view in the
+// modal that asks the user if they want to install the app to their home
+// screen. Only fires on browsers that actually support a native install
+// dialog (Chrome / Edge) — iOS Safari and any environment without a
+// deferred `beforeinstallprompt` event closes the modal as before.
+//
+// `.prompt()` requires fresh transient user activation, so the click on
+// the "Install app" button is what triggers it — not the prior "Download
+// now" click (whose activation token was consumed by the long await).
+async function maybeShowInstallStep(modal) {
+  if (isStandalone() || isIOS()) return;
+  if (!hasDeferredInstallPrompt()) {
+    await waitForDeferredPrompt(1500);
+    if (!hasDeferredInstallPrompt()) return;
+  }
+  const step1 = modal.querySelector('#install-step1');
+  const step2 = modal.querySelector('#install-step2');
+  const yes = modal.querySelector('#install-step2-yes');
+  const no = modal.querySelector('#install-step2-no');
+  if (!step1 || !step2 || !yes || !no) return;
+  step1.setAttribute('hidden', '');
+  step2.removeAttribute('hidden');
+  await new Promise((res) => {
+    const finish = () => {
+      yes.removeEventListener('click', onYes);
+      no.removeEventListener('click', onNo);
+      res();
+    };
+    const onYes = async () => {
+      yes.disabled = true;
+      no.disabled = true;
+      yes.textContent = 'Opening…';
+      try { await triggerInstallPrompt(); } catch {}
+      finish();
+    };
+    const onNo = () => finish();
+    yes.addEventListener('click', onYes);
+    no.addEventListener('click', onNo);
+  });
+}
+
+function waitForDeferredPrompt(timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (done) return; done = true; unsub(); resolve(); };
+    const unsub = onInstallPromptChange(() => { if (hasDeferredInstallPrompt()) finish(); });
+    setTimeout(finish, timeoutMs);
   });
 }
 

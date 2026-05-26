@@ -5,9 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Open Bike Map Seattle</title>
     <link rel="stylesheet" href="/src/style.css" />
-    <!-- Material Symbols vendored locally (see scripts/fetch_material_symbols.sh).
-         Eliminates the Google Fonts network dependency so the PWA can run
-         fully offline. -->
+    <!-- Inter (variable, latin range) + Material Symbols both vendored
+         locally (see scripts/fetch_inter.sh and scripts/fetch_material_symbols.sh).
+         Inter is the UI font so the app reads the same on every device
+         (system fonts on iOS vs Android vs Windows vs macOS look distinct).
+         No network dependency on Google Fonts at runtime. -->
+    <link rel="stylesheet" href="./fonts/inter.css" />
     <link rel="stylesheet" href="./fonts/material-symbols-outlined.css" />
 
     <!-- ============ PWA wiring ============ -->
@@ -18,7 +21,7 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="Bike Map" />
+    <meta name="apple-mobile-web-app-title" content="OBMS" />
   </head>
   <body>
     <!-- ============ PWA install modal (blocking, first visit only) ============
@@ -28,19 +31,31 @@
          src/main.js proceed to map init. -->
     <div id="install-modal" hidden>
       <div class="install-card">
-        <img src="./icons/icon-circle-192.png" alt="" class="install-icon" width="96" height="96" />
-        <h2>Open Bike Map Seattle</h2>
-        <p>This app runs offline and requires <strong id="install-size">…</strong> of data.</p>
-        <button id="install-go" type="button" class="install-cta">Download now</button>
-        <div id="install-progress-wrap" hidden>
-          <div id="install-progress-bar"><div id="install-progress-fill"></div></div>
-          <div id="install-progress-text">0%</div>
+        <div id="install-step1">
+          <p>This app runs offline and requires <strong id="install-size">…</strong> of data.</p>
+          <button id="install-go" type="button" class="install-cta">Download now</button>
+          <div id="install-progress-wrap" hidden>
+            <div id="install-progress-bar"><div id="install-progress-fill"></div></div>
+            <div id="install-progress-text">0%</div>
+          </div>
+          <div id="install-error" hidden></div>
+          <details id="ios-hint" hidden>
+            <summary>On iPhone? Tap Share → Add to Home Screen first.</summary>
+            <p>For full offline support, install this site to your home screen via Safari's Share menu, then reopen from the new icon.</p>
+          </details>
         </div>
-        <div id="install-error" hidden></div>
-        <details id="ios-hint" hidden>
-          <summary>On iPhone? Tap Share → Add to Home Screen first.</summary>
-          <p>For full offline support, install this site to your home screen via Safari's Share menu, then reopen from the new icon.</p>
-        </details>
+        <!-- Step 2 is shown only on Chrome/Edge after the download completes,
+             when a deferred `beforeinstallprompt` event is available. Skipped
+             on iOS (no programmatic install) and on any browser where the
+             event never fired. -->
+        <div id="install-step2" hidden>
+          <p>For easier access, install Open Bike Map Seattle to your home screen.</p>
+          <p class="install-aside">You can always install later through the Settings menu.</p>
+          <div class="install-actions">
+            <button id="install-step2-yes" type="button" class="install-cta">Install app</button>
+            <button id="install-step2-no" type="button" class="install-cta install-cta-secondary">Continue to website</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -243,6 +258,8 @@
       <section class="panel-section">
         <h3>Manage data</h3>
         <div class="manage-data-actions">
+          <button id="settings-install-btn" type="button" class="manage-data-btn" hidden>Install app</button>
+          <p id="settings-install-hint" class="manage-data-hint" hidden></p>
           <button id="settings-update-btn" type="button" class="manage-data-btn" disabled>Checking for updates…</button>
           <button id="settings-delete-btn" type="button" class="manage-data-btn manage-data-btn-danger">Delete data</button>
         </div>
@@ -288,7 +305,8 @@
           <li>Light rail station data &copy; <a href="https://www.soundtransit.org" target="_blank" rel="noopener">Sound Transit</a> (via SDOT)</li>
           <li>Elevation data from the <a href="https://www.usgs.gov/3d-elevation-program" target="_blank" rel="noopener">USGS 3D Elevation Program</a></li>
           <li>Basemap tiles by <a href="https://protomaps.com" target="_blank" rel="noopener">Protomaps</a></li>
-          <li>Icons &copy; <a href="https://fonts.google.com/icons" target="_blank" rel="noopener">Google Material Symbols</a></li>
+          <li>UI font <a href="https://rsms.me/inter/" target="_blank" rel="noopener">Inter</a> by Rasmus Andersson (<a href="./fonts/inter-LICENSE.txt" target="_blank" rel="noopener">SIL OFL 1.1</a>)</li>
+          <li>Icons &copy; <a href="https://fonts.google.com/icons" target="_blank" rel="noopener">Google Material Symbols</a> (<a href="./fonts/material-symbols-LICENSE.txt" target="_blank" rel="noopener">Apache 2.0</a>)</li>
           <li>Map rendering by <a href="https://maplibre.org" target="_blank" rel="noopener">MapLibre GL JS</a> (BSD-3-Clause)</li>
           <li>Vector tile reader: <a href="https://github.com/protomaps/PMTiles" target="_blank" rel="noopener">PMTiles</a> (BSD-3-Clause)</li>
           <li>Address &amp; POI search powered by <a href="https://github.com/nextapps-de/flexsearch" target="_blank" rel="noopener">FlexSearch</a> (Apache-2.0)</li>
