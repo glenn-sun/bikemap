@@ -42,24 +42,42 @@ const SNAPS = ['peek', 'full'];
 const HANDLE_HEIGHT = 26;
 
 // Static peek height: drag handle (26) + Directions section content
-// (h3 ~22 + 2 input rows w/ margin ~66 + section padding ~22) +
-// a small buffer. The section's CSS is stable, so a static value is
-// simpler than measuring the DOM and dodges any layout-timing edge
-// cases that could shift snap heights mid-flow.
+// (h3 ~22 + 2 input rows w/ margin ~66 + section bottom padding ~12).
+// Section top padding is 0 on mobile (see #sheet #route-endpoints rule
+// in style.css), so the content sits flush with the drag handle and
+// the sheet shows ~10 px more of the map below than it used to.
+// The section's CSS is stable, so a static value is simpler than
+// measuring the DOM and dodges any layout-timing edge cases that
+// could shift snap heights mid-flow.
 //
 // KEEP IN SYNC with the initial `transform: translateY(calc(100vh -
-// 148px))` on `#sheet` in src/style.css. The CSS rule is what
+// 138px))` on `#sheet` in src/style.css. The CSS rule is what
 // positions the sheet before sheet.js runs; if it doesn't match this
 // value, the sheet flashes at the CSS height on load and then re-
 // snaps to PEEK_HEIGHT once initSheet executes.
-const PEEK_HEIGHT = 148;
+const PEEK_HEIGHT = 138;
 
-// Top offset of the sheet when at "full" snap — leaves this many px
-// of map strip visible above the sheet. Anchoring the sheet TOP to a
-// fixed offset (rather than e.g. 92% of viewport) keeps the sheet
-// from appearing to jump down when the iOS keyboard dismisses and
-// vh grows.
-const FULL_TOP_OFFSET = 44;
+// Gap (px) between the floating #app-header pill's bottom edge and the
+// sheet's top when expanded to "full". Matches the 10 px gutter above
+// the header so the visual rhythm reads "header — gap — sheet" with
+// equal whitespace on either side of the header.
+const HEADER_TO_SHEET_GAP = 10;
+
+// Fallback for the header offset if #app-header isn't in the DOM (only
+// possible during early init or in tests). Mirrors the CSS values:
+// `top: 10px` + `height: 40px` = bottom at y=50 → +10 gap = 60.
+const FULL_TOP_OFFSET_FALLBACK = 60;
+
+// In standalone PWA mode the header shifts down by safe-area-inset-top,
+// so we measure the actual header bottom every recompute rather than
+// hard-coding. Anchoring the sheet TOP to this offset (rather than e.g.
+// 92% of viewport) keeps the sheet from appearing to jump down when the
+// iOS keyboard dismisses and vh grows.
+function fullTopOffset() {
+  const h = document.getElementById('app-header');
+  if (!h) return FULL_TOP_OFFSET_FALLBACK;
+  return Math.round(h.getBoundingClientRect().bottom) + HEADER_TO_SHEET_GAP;
+}
 
 // Minimum gesture distance before a content swipe is interpreted as a
 // drag intent. Below this we wait — short enough to feel responsive,
@@ -80,7 +98,7 @@ function computeSnaps() {
     peek: PEEK_HEIGHT,
     // Floor of (PEEK_HEIGHT + 60) so we never compute a full smaller
     // than peek on very short viewports (tiny in-app browsers etc).
-    full: Math.max(PEEK_HEIGHT + 60, vh - FULL_TOP_OFFSET),
+    full: Math.max(PEEK_HEIGHT + 60, vh - fullTopOffset()),
   };
 }
 

@@ -1086,9 +1086,9 @@ body {
     border-top-right-radius: 8px;
     transition: transform 220ms cubic-bezier(.2,.7,.2,1);
     /* Initial peek before sheet.js runs — must match PEEK_HEIGHT in
-     * src/sheet.js (148 px). Otherwise the sheet flashes at this
+     * src/sheet.js (138 px). Otherwise the sheet flashes at this
      * height and then resnaps to the JS value once initSheet executes. */
-    transform: translateY(calc(100vh - 148px));
+    transform: translateY(calc(100vh - 138px));
   }
   #sheet.dragging { transition: none; }
 
@@ -1145,6 +1145,7 @@ body {
     padding: 0;
   }
   #sheet #directions-panel { padding-top: 8px; }
+  #sheet #route-endpoints { padding-top: 0; }
 
   /* === Layers panel — full-screen overlay styled like the settings
    * dialog. The same #layers-panel element is used; CSS reshapes it. */
