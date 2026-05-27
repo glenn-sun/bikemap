@@ -169,8 +169,10 @@ function waitForDeferredPrompt(timeoutMs) {
 }
 
 // Sequentially download every file in `manifest.files`, write it into the
-// data cache, and report aggregate progress (weighted by file size — the
-// 62 MB routing graph dominates a single percent of the bar).
+// data cache, and report aggregate progress weighted by gzipped size —
+// the 62 MB pmtiles basemap is already-compressed and dominates ~75 %
+// of the ~82 MB total; routing_graph.json is the next-largest at
+// ~12 MB gz.
 //
 // Sequential not parallel: keeps peak memory bounded to one file's worth
 // of buffered chunks (~62 MB worst case), and avoids overwhelming GH Pages.

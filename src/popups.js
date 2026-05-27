@@ -150,7 +150,8 @@ const formatters = {
     ${row('Size', p.SIGNSZ && `${p.SIGNSZ}"`)}
     ${row('Mount', p.SUPPORTDESCR && p.SUPPORTDESCR.trim())}`,
 
-  // All four bike-facility sub-layers + the new planned layer share schema.
+  // All bike-facility sub-layers (aaa/bbl/bl/narrow + under-construction
+  // variants) share schema.
   __bikeFacility: (p) => {
     const cat = decode(BIKE_FACILITY_CATEGORY, p.CATEGORY);
     const dir = decode(BIKE_FACILITY_MODEL, p.MODEL_TYPE);

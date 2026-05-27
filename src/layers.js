@@ -1,12 +1,11 @@
 // Source + paint config for every SDOT / King County data layer.
 //
 // Color tiers for bike infrastructure (per user spec):
-//   dark green   — Bike+, NGW, PBL, all multi-use & regional trails
+//   dark green   — AAA: NGW, PBL, OFFST + all multi-use & regional trails + Bike+ existing
 //   medium green — BBL (buffered bike lane)
 //   light green  — BL  (bike lane)
-//   orange       — CLMB (climbing) and SHW (sharrow / shoulder)
-//   hot pink     — OFFST (off-street, exploratory color so we can see them)
-// Proposed segments are dashed.
+//   orange       — CLMB (climbing) and SHW (sharrow)
+// Bike+ proposed / planned segments render gray and dotted.
 
 const DATA = (name) => `${import.meta.env.BASE_URL}data/${name}.geojson`;
 
@@ -96,7 +95,6 @@ async function loadMaterialIcon(map, name, fillColor) {
   });
   URL.revokeObjectURL(objUrl);
 
-  // Compose on a 64x64 canvas: filled circle background + icon centered.
   const SIZE = 64;
   const canvas = document.createElement('canvas');
   canvas.width = SIZE;
@@ -108,7 +106,6 @@ async function loadMaterialIcon(map, name, fillColor) {
   ctx.shadowBlur = 3;
   ctx.shadowOffsetY = 1;
 
-  // Filled circle.
   ctx.fillStyle = fillColor;
   ctx.beginPath();
   ctx.arc(SIZE / 2, SIZE / 2, SIZE / 2 - 3, 0, Math.PI * 2);
@@ -133,11 +130,9 @@ export async function addDataLayers(map, beforeId = undefined) {
   // Local helper so every layer we add slots in just below the basemap labels.
   const add = (layer) => map.addLayer(layer, beforeId);
   // ---------- icon loads (parallel) ----------
-  // POI fill colors are picked to read as distinct symbols and to stay
-  // clear of the standard Google-blue `.user-location-dot` (#4285f4).
-  // Restrooms shift to a deeper indigo, light rail to a darker teal,
-  // and bike-signs (below) move to brown — none of which compete with
-  // the live-location marker.
+  // POI fill colors stay clear of the standard Google-blue
+  // `.user-location-dot` (#4285f4) so the live-location marker reads as
+  // the only blue dot on the map.
   await Promise.all([
     loadMaterialIcon(map, 'wc',            '#3949ab'),  // park restrooms (indigo)
     loadMaterialIcon(map, 'groups',        '#1faa8d'),  // community centers (teal-green)
@@ -437,7 +432,6 @@ export async function addDataLayers(map, beforeId = undefined) {
     },
   });
 
-  // Light rail stations on top.
   add({
     id: 'light-rail-stations',
     type: 'symbol',
@@ -452,9 +446,8 @@ export async function addDataLayers(map, beforeId = undefined) {
 
   // ---------- routing-prototype debug layers ----------
   // All hidden by default; toggleable. Owner uses these to spot-check that
-  // the SDOT classifications we route on (alleys, signal-controlled
-  // intersections, marked crosswalks, beacons) match what's actually on
-  // the street.
+  // the SDOT point features the routing graph snaps to (signals,
+  // crosswalks, beacons, stop signs) match what's actually on the street.
 
   add({
     id: 'signals-debug',
@@ -498,8 +491,7 @@ export async function addDataLayers(map, beforeId = undefined) {
     layout: { visibility: 'none' },
   });
 
-  // Stop signs — stop-sign-red (filled), white halo to distinguish from
-  // the brighter signals-debug red.
+  // Stop signs — stop-sign-red, darker than the brighter signals-debug red.
   add({
     id: 'stop-signs-debug',
     type: 'circle',

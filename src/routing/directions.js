@@ -10,13 +10,6 @@ import { TURN_THRESHOLD_DEG } from './cost.js';
 
 const SHARP_DEG = 110;
 
-/**
- * Build the directions list.
- *
- * @param graph        the routing graph
- * @param pathEdgeIds  ordered list of edge IDs from A*
- * @returns Array<{ instruction, streetName, distanceFt, annotations: string[] }>
- */
 // A short unnamed edge that sits between two same-named edges of the same
 // street is almost always just an OSM way-split (driveway, bridge expansion
 // joint, jurisdiction change). Treat it as part of the surrounding street

@@ -3,9 +3,10 @@
 // lets the "Under construction" toggle AND the per-category toggles both
 // control the same construction-dotted layers correctly.
 //
-// `onChange(cb)` registers a callback invoked with the full
-// `{groupName: bool}` snapshot whenever any group toggles — used by the
-// persistence layer in main.js to save toggle state to localStorage.
+// `onChange(cb)` registers a callback invoked whenever any group
+// toggles. The snapshot passed to the callback is the DIFF from HTML
+// defaults (only groups currently differing from their checkbox's
+// initial `checked` attribute) — keeps the persisted blob small.
 
 export class VisibilityManager {
   constructor(map) {

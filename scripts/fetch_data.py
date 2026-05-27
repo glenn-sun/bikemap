@@ -46,7 +46,6 @@ class Layer:
     # slim the GeoJSON when we only need a handful of attributes (matters for
     # large layers like seattle_streets that would otherwise be ~40 MB).
     out_fields: str = "*"
-    # Some servers reject f=geojson and need esriJSON -> manual conversion; not needed here.
 
 
 LAYERS: list[Layer] = [
@@ -113,11 +112,10 @@ LAYERS: list[Layer] = [
         where="STATUS = 'INSVC'",
         out_fields="COMPKEY,UNITDESC,ARTCLASS,SURFACEWIDTH,SPEEDLIMIT,ONEWAY,SLOPE_PCT",
     ),
-    # NOTE: alleys.geojson is NOT fetched from SDOT — SEGMENT_TYPE=15 turned
-    # out to be tiny micro-segments, not real alleys. Instead, build_graph.py
-    # derives alleys.geojson from OSM ways tagged highway=service + service=alley.
-    # Intersection-control points snapped to graph nodes; zero out the
-    # crossing penalty when present.
+    # No alleys layer: SEGMENT_TYPE=15 looked like alleys but is tiny micro-
+    # segments. build_graph.py excludes OSM alleys entirely in _is_bike_routable.
+    # Intersection-control points (signals/crosswalks/beacons/stop signs) snap
+    # to graph nodes; cost.js zeroes the unsignalized-crossing penalty when present.
     Layer(
         "signals",
         f"{SDOT}/Traffic_Signal_Assemblies_(Active)/FeatureServer/0",

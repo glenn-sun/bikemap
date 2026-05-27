@@ -27,8 +27,8 @@ registerServiceWorker();
 (async function boot() {
   await ensureInstalled();
   await initApp();
-  initManageData();  // wires Settings → Manage data buttons
-  checkForUpdate();  // silent version-only catchup; no UI side effect
+  initManageData();
+  checkForUpdate();  // currently a no-op; kept for boot-sequence compat (see pwa/update.js)
 })().catch((err) => {
   console.error('[boot] fatal:', err);
   const errEl = document.getElementById('install-error');
@@ -128,9 +128,8 @@ function wireLayersModal() {
     fab.classList.toggle('active', visible);
   };
 
-  // Initial state: visible on desktop, hidden on mobile (matches each
-  // viewport's CSS default; this call just syncs the FAB's `.active`
-  // class to that default).
+  // Sync the FAB's `.active` class to whichever viewport's CSS default
+  // is in effect (panel visible on desktop, hidden on mobile).
   setVisible(isVisible());
 
   fab.addEventListener('click', () => setVisible(!isVisible()));
@@ -139,8 +138,8 @@ function wireLayersModal() {
     if (e.key === 'Escape' && isMobile() && isVisible()) setVisible(false);
   });
 
-  // Resyc when the user crosses the breakpoint via resize — the CSS
-  // defaults flip (e.g. resize into mobile hides the previously-visible
+  // Resync when the user crosses the breakpoint via resize — the CSS
+  // defaults flip (resize into mobile hides the previously-visible
   // desktop panel), so the FAB's `.active` state should track that.
   window.matchMedia('(max-width: 719px)').addEventListener?.('change', () => {
     setVisible(isVisible());

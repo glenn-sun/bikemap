@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-v3 elevation prep: sample USGS 3DEP DTM at every routing-graph node
-and extract 25-ft contour lines.
+Elevation prep — Stage 1 of two: sample (smoothed) USGS 3DEP DTM at
+every routing-graph node, uniform-resample per-edge profiles, and
+extract 25-ft contour lines from the raw DTM.
 
 The DTM (Digital Terrain Model, bare earth) for Western Washington is
 USGS 3DEP 1/3 arc-second tile `n48w123` (~10 m resolution, ~415 MB).
@@ -12,18 +13,20 @@ few MB rather than the full 415 MB. The fetched window is cached to
 
 Outputs:
   - public/data/routing_graph.json   Populates nodes.elev[], geomElevs[]
-                                     (per-vertex bilinear DTM), and the
-                                     per-directed-edge climb metrics
+                                     (per-vertex bilinear DTM, sampled
+                                     from a 5×5-median + σ=2 Gaussian-
+                                     smoothed window), and the per-
+                                     directed-edge climb metrics
                                      (uphillFt, maxUphillPct, steepFt2)
-                                     derived from those samples. Wires
-                                     elevation into the existing cost.js
-                                     terms — temporarily, until v3 lands
-                                     a real pipeline that smooths /
-                                     corrects bridges.
-  - public/data/contours.geojson     25-ft contour lines (-50 .. 500 ft).
-
-v3 will build on top of this — for now it's a baseline "DTM-only, no
-smoothing" sample for visual debugging and routing-cost wiring.
+                                     computed against a uniform 75-ft
+                                     sub-segment resample. Bridges and
+                                     other DTM-wrong corridors are NOT
+                                     fixed here — that's Stage 2
+                                     (resolve_elevation.py).
+  - public/data/contours.geojson     25-ft contour lines (-50 .. 500 ft),
+                                     extracted from the RAW (unsmoothed)
+                                     DTM so the topographic layer stays
+                                     free of resampling artifacts.
 """
 
 import json
@@ -53,12 +56,10 @@ CONTOURS_OUT  = Path("public/data/contours.geojson")
 WINDOW_CACHE  = Path("dtm_cache/seattle_window.npy")
 WINDOW_META   = Path("dtm_cache/seattle_window.json")
 
-# Match the existing contour snapshot's settings exactly so the swap is safe.
 CONTOUR_LEVELS = list(range(-50, 525, 25))     # -50, -25, 0, ..., 500
 COORD_DECIMALS = 6
 # Douglas-Peucker tolerance for contour simplification. 9e-5 deg ≈ 10 m
-# at this latitude — empirically reproduces the vertex density of the
-# pre-deprecation 1.77 MB / 67 K-vertex contour snapshot.
+# at this latitude — empirically tuned for ~1.7 MB / ~67 K-vertex output.
 SIMPLIFY_TOL_DEG = 9e-5
 
 M_TO_FT = 3.28084                              # USGS 3DEP DTM is in meters NAVD88
@@ -132,9 +133,9 @@ def sample_nodes(graph, elev_ft, win_transform):
     return [round(float(v), 1) for v in samples]
 
 
-# cost.js applies steepCoeff · max(0, slope − STEEP_THRESHOLD)² per
-# sub-segment. 2% matches the deprecated v1/v2 pipelines so the same
-# tuning constants in cost.js stay calibrated.
+# The 2% steep threshold is baked into the precomputed steepFt2 here;
+# cost.js multiplies that by `steepCoeff` (no JS-side threshold). Change
+# this and you must rebuild the graph.
 STEEP_THRESHOLD = 0.02
 EARTH_RADIUS_FT = 20902231.0
 
@@ -147,8 +148,10 @@ EARTH_RADIUS_FT = 20902231.0
 # spot — fine enough to preserve real terrain features, coarse enough
 # to smooth out single-segment "catch up" artifacts where the OSM
 # centerline drifts off-true and corrects itself at the next vertex.
-# `geomElevs[]` (per-OSM-vertex DTM samples) is kept untouched so the
-# directions-panel elevation chart still shows real per-vertex detail.
+# `geomElevs[]` is then rewritten with the resampled curve linear-
+# interped back to the OSM vertex positions, so the chart and
+# climbStats see the same smoothed curve the cost metrics were built
+# from.
 COST_RESAMPLE_FT = 75.0
 
 # Light raster denoising for graph sampling ONLY. Contour extraction
@@ -156,8 +159,8 @@ COST_RESAMPLE_FT = 75.0
 # pristine. The two-pass median + Gaussian combo kills isolated spike
 # outliers AND continuous low-amplitude noise without smearing real
 # terrain edges (bluffs, retaining walls) too much. Bridges are NOT
-# fixed by this — they're systematic, not noise — and need explicit
-# per-edge handling in v3.
+# fixed by this — they're systematic, not noise — and are corrected in
+# the Stage-2 heat-equation pass (resolve_elevation.py).
 MEDIAN_KERNEL_SIZE = 5      # 5×5 = ~50 m at our 10 m raster
 GAUSSIAN_SIGMA_PX  = 2.0    # σ ~ 2 cells — moderate residual smoothing
 

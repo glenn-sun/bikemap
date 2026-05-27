@@ -25,10 +25,11 @@ Output schema (one record = one address or POI):
                                      # still routes from its closest street.
       x: lon, y: lat }               # POI / address own coords (for pins)
 
-Address coverage depends on OSM `addr:housenumber` tagging — well-covered
-in dense neighborhoods, sparser in outer residential areas. The browser
-side falls back to whichever named record matches best when a typed
-housenumber isn't found.
+Address coverage of street-numbered houses is essentially complete in
+Seattle's OSM. Known gaps: DADUs/AADUs (backyard cottages typically
+share the main house's polygon), apartment-unit specificity, and POI
+name variants without `alt_name` tags. The browser side falls back to
+whichever named record matches best when a typed housenumber isn't found.
 """
 
 from __future__ import annotations

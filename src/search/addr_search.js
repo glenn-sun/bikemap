@@ -1,13 +1,14 @@
 // Fully-offline address + POI search for route endpoints.
 //
 // Loads public/data/addr_index.json (built by scripts/build_addr_index.py
-// from OSM via Overpass), builds a FlexSearch Document index keyed on the
-// `t` (text) field, and exposes `search(query, opts)` for the UI's
-// autocomplete dropdown. No external API calls.
+// from OSM via Overpass), builds a FlexSearch.Index over each record's
+// `t` (text) field, and exposes `searchAddresses(query, opts)` for the
+// UI's autocomplete dropdown. No external API calls.
 //
 // Index record schema (see build_addr_index.py):
 //   { i: <number>, k: 'a'|'p', t: <label>, c: <category|undefined>,
-//     x: <lon>, y: <lat> }
+//     x: <lon>, y: <lat>,
+//     a, ax, ay: nearest-housenumber label + coords (POIs only) }
 
 import FlexSearch from 'flexsearch';
 import { normalizeAddress } from '../road_names.js';
@@ -24,9 +25,9 @@ function ensureLoaded() {
       return r.json();
     })
     .then((records) => {
-      // Tokenize on "forward" so prefix typing like "Cal And" matches
-      // "Cal Anderson Park"; cache resolutions so repeated keystrokes are
-      // sub-ms; soundex-style suggest=true so single-char typos still match.
+      // tokenize: 'forward' so prefix typing like "Cal And" matches
+      // "Cal Anderson Park"; cache: true keeps repeated keystrokes sub-ms;
+      // resolution: 9 gives the finest ranking granularity FlexSearch offers.
       const index = new FlexSearch.Index({
         tokenize: 'forward',
         cache: true,
@@ -55,7 +56,8 @@ export function preloadAddrIndex() {
  * @param query  user input string
  * @param opts.limit         max results (default 6)
  * @param opts.mapCenter     [lon, lat] for proximity tie-breaker (optional)
- * @returns Promise<Array<{ id, kind, label, category, lon, lat }>>
+ * @returns Promise<Array<{ id, kind, label, category, address,
+ *                          lon, lat, snapLon, snapLat }>>
  */
 export async function searchAddresses(query, opts = {}) {
   const limit = opts.limit ?? 6;

@@ -12,11 +12,8 @@
 // stays in lock-step with the JS normalizer used by the other two
 // surfaces.
 
-// Compound directions listed before singles so the generated MapLibre
-// case-arms read top-down longest-first. Both forms end with a space
-// when matched as a prefix so single-word "North " never shadows
-// "Northwest " in practice, but the explicit ordering keeps the source
-// readable.
+// Longest-first so labels.js can walk the list top-down and produce a
+// MapLibre case-arm that matches "Northwest" before "North".
 export const DIRECTIONALS = [
   ['Northwest', 'NW'], ['Northeast', 'NE'],
   ['Southwest', 'SW'], ['Southeast', 'SE'],
@@ -24,10 +21,9 @@ export const DIRECTIONALS = [
   ['East', 'E'],  ['West', 'W'],
 ];
 
-// Street-type suffixes, ordered longest-first for the same readability
-// reason. "Way" is intentionally absent — already short, and "X Way"
-// appears so often as a literal place name (Aurora Ave, Sand Point Way)
-// that no abbreviation is desired.
+// "Way" is intentionally absent — already short, and "X Way" appears so
+// often as a literal place name (Aurora Ave, Sand Point Way) that no
+// abbreviation is desired.
 export const STREET_SUFFIXES = [
   ['Boulevard', 'Blvd'],
   ['Parkway',   'Pkwy'],
@@ -42,14 +38,9 @@ export const STREET_SUFFIXES = [
   ['Lane',      'Ln'],
 ];
 
-// Global word-boundary regex pass. Seattle road names use directionals
-// only at the very start or end of the string, and street types only at
-// the end (or right before a trailing directional). For those positions
-// the global replace produces identical output to the positional
-// MapLibre expression in labels.js, while staying readable. Word
-// boundaries keep "Streetside" / "Northeastern" / "Eastland" from
-// triggering. Case-insensitive on the input so a user typing
-// "northeast 65th" still matches the index.
+// Word boundaries keep "Streetside" / "Northeastern" / "Eastland" from
+// triggering. Case-insensitive so a user typing "northeast 65th" still
+// matches the index.
 const REGEXES = [
   ...DIRECTIONALS.map(([full, abbr]) => [new RegExp(`\\b${full}\\b`, 'gi'), abbr]),
   ...STREET_SUFFIXES.map(([full, abbr]) => [new RegExp(`\\b${full}\\b`, 'gi'), abbr]),

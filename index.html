@@ -82,8 +82,8 @@
          Top-level sibling of #sheet (NOT a child of it) so the
          transform on #sheet doesn't act as a containing block for
          this fixed-positioned element on mobile. Desktop: pinned
-         pill at top-left. Mobile (≤719 px): fixed full-width bar at
-         top of viewport. -->
+         pill at top-left. Mobile (≤719 px): floating pill spanning
+         the top with a 10 px gutter on each side. -->
     <header id="app-header">
       <img class="app-logo" src="./icons/icon-circle-192.png" alt="" width="28" height="28" />
       <h1 class="app-title">Open Bike Map Seattle</h1>
@@ -166,7 +166,7 @@
 
     <!-- ====== Top-right (LEFT of zoom): layers visibility ======
          On desktop: positioned absolutely at top-right (original look).
-         On mobile (@media max-width: 640px): hidden by default; the
+         On mobile (@media max-width: 719px): hidden by default; the
          #layers-fab toggles an `.open` class on this element to show it
          as a full-screen overlay. -->
     <div id="layers-panel">

@@ -1,29 +1,8 @@
-// Routing UI. Responsibilities:
-//
-//   1. Two route-endpoint inputs (Start, End) with FlexSearch-backed
-//      autocomplete. When focused + empty, the dropdown shows three options:
-//      Home, Work, "Choose on map". Otherwise it shows search hits.
-//
-//   2. "Choose on map" mode — explicit state where the next map click
-//      sets the endpoint. Cursor turns to a crosshair via CSS; Escape
-//      cancels. While the mode is active, popups.js suppresses its per-
-//      layer popup handlers (see src/routing/mode.js).
-//
-//   3. A Settings modal (native <dialog>) where the user edits Home / Work
-//      and the 5 Custom-preset sliders, plus attributions.
-//
-//   4. Up to 3 routes (primary + 2 twists from cost.js TWISTS). When >1
-//      survives the similarity filter (findPathsMulti), a tab strip lets
-//      the user swap which one is the rendered primary. Clicking a route
-//      line on the map does the same. Each alt has a small floating label
-//      at the midpoint of its longest unique segment (not the route
-//      midpoint — that often lands on shared road).
-//
-// Naming convention: the route computed under the chosen preset's weights
-// always carries the label "Primary". Twist routes carry their twist
-// label ("Quieter", "More direct") permanently — even after a user
-// promotes a twist by clicking, the original primary stays "Primary" and
-// the twist stays "More direct".
+// Routing UI: endpoint inputs (FlexSearch autocomplete + Home/Work/
+// My-location/Choose-on-map options), choose-on-map mode, settings modal,
+// and up to 3 routes (primary + twists) with a tab strip for swapping
+// which is rendered as the pink primary. Tab labels are insertion-stable
+// — promoting a twist by click does not relabel it.
 
 import maplibregl from 'maplibre-gl';
 import { loadGraph } from './graph.js';
@@ -45,8 +24,7 @@ const GRAPH_URL = `${import.meta.env.BASE_URL}data/routing_graph.json`;
 const SIGNS_URL = `${import.meta.env.BASE_URL}data/bike_signs.geojson`;
 const BIKE_RACKS_URL = `${import.meta.env.BASE_URL}data/bicycle_racks.geojson`;
 
-// Distance thresholds for the destination bike-parking section that
-// renders between the route summary and the turn-by-turn steps.
+// Distance thresholds for the destination bike-parking badge.
 const RACK_GREEN_FT  = 300;
 const RACK_YELLOW_FT = 1000;
 
@@ -67,10 +45,8 @@ const LS_WORK   = 'bikemap-saved-work';
 const LS_SPEED  = 'bikemap-cycling-speed-mph';
 const DEFAULT_SPEED_MPH = 10;
 
-// IDs of the five routing-debug toggle checkboxes (one per debug overlay
-// in the layers panel). The "Enable routing debug layers" Settings toggle
-// gates their visibility in the layers panel AND clears all seven when it
-// is disabled.
+// Routing-debug toggle checkbox ids. The Settings "Enable routing debug"
+// toggle gates this whole group and force-clears them when disabled.
 const DEBUG_TOGGLE_IDS = [
   'toggle-signals-debug',
   'toggle-crosswalks-debug',
@@ -79,10 +55,9 @@ const DEBUG_TOGGLE_IDS = [
   'toggle-graph-debug',
 ];
 
-// Route is rendered in pink — opposite green on the color wheel so AAA /
-// BBL / BL paint shows through (via the below-infra layer order) without
-// the route hue clashing or being swallowed by green. Alt is the same
-// hue, lighter, to read as "secondary" without changing thickness.
+// Route in pink so the green tier paint shows through it (route layers
+// sit below bike infra). Alts use the same hue, lighter, instead of a
+// thinner stroke.
 const PRIMARY_COLOR    = '#e91e63';
 const ALT_LINE_COLOR   = '#f48fb1';
 const ALT_CASING_COLOR = '#ffffff';
@@ -92,7 +67,7 @@ let state_holder = { current: null };
 export function initRoutingUI(map, vm = null) {
   const state = {
     map,
-    vm,                  // visibility manager (for graph-debug refresh)
+    vm,
     graph: null,
     signs: null,
     bikeRacks: null,
@@ -114,29 +89,18 @@ export function initRoutingUI(map, vm = null) {
     home: loadLocFromStorage(LS_HOME),
     work: loadLocFromStorage(LS_WORK),
     speedMph: loadSpeedFromStorage(),
-    activeIndex: 0,      // index into state.routes that's currently rendered
-                         // as the pink primary line / step list
-    userLocation: null,  // {lon, lat, accuracy} — null until first GPS fix
+    activeIndex: 0,
+    userLocation: null,        // {lon, lat, accuracy} — null until first fix
     userLocationMarker: null,
     geoWatchIdHigh: null,
     geoWatchIdLow: null,
-    locationPending: false,   // a "My location" pick is awaiting a fix
-    locationError: null,      // last error string from a failed location pick;
-                              // surfaced as subtext under "My location" in the
-                              // endpoint dropdown, not as a panel banner
-    locationDropdownRefresh: null,  // installed by the currently-focused
-                                    // endpoint dropdown so requestLocationOnce
-                                    // can re-render it as state changes
-    // Two-way hover sync between elevation chart and the active route
-    // line on the map. `hoverSeries` is the current active route's
-    // elevation series (distances/elevations/coords); `hoverMarker` is a
-    // pink dot that tracks the cursor on the map; the chart cursor lives
-    // inside the .route-elev SVG as a <line> + <circle>.
-    hoverSeries: null,
+    locationPending: false,    // a "My location" pick is awaiting a fix
+    locationError: null,       // surfaced as "My location" dropdown subtext
+    locationDropdownRefresh: null, // set by the focused endpoint dropdown
+    hoverSeries: null,         // active route's elevation series (chart↔map hover)
     hoverMarker: null,
   };
-  // If the persisted preset is Custom but Custom is no longer enabled,
-  // fall back so we never expose a hidden mode.
+  // Persisted preset == 'custom' but Custom is disabled → fall back.
   if (state.preset === 'custom' && !state.customEnabled) {
     state.preset = 'comfort';
     savePresetToStorage(state.preset);
@@ -154,13 +118,9 @@ export function initRoutingUI(map, vm = null) {
   startUserLocationTracking(state);
   attachMapHoverHandlers(state);
   attachDirectionsResizeHandler(state);
-  // Boot-time enforcement of the debug gate: if it's off (default), make
-  // sure no debug layer is visible even if a stale `bikemap-toggles` entry
-  // would otherwise have re-enabled one.
+  // Force-clear any stale debug toggles persisted from a prior session
+  // where the gate was on.
   applyDebugEnabledUI(state, { forceClearOnDisable: true });
-
-  // The panel stays hidden until there's actually a route to show. While
-  // the graph is loading, the absence of any UI here is the cue.
 
   Promise.all([
     loadGraph(GRAPH_URL),
@@ -171,8 +131,8 @@ export function initRoutingUI(map, vm = null) {
     state.signs = signs;
     state.bikeRacks = bikeRacks;
     addGraphDebugLayers(map, graph);
-    // The visibility manager bound graph-debug to a checkbox before the
-    // layers existed; apply now so the checkbox state takes effect.
+    // graph-debug was bound to a checkbox before the layers existed;
+    // re-apply now that they do.
     vm?.apply();
     console.log(`[routing] graph loaded: ${graph.nodeCount} nodes, ${graph.edgeCount} edges`);
   }).catch((err) => {
@@ -191,12 +151,7 @@ export function initRoutingUI(map, vm = null) {
   });
 }
 
-// ---------- public entry: route from current location to a POI ----------
-//
-// Called from popups.js when the user clicks the "Go" button inside a POI
-// popup. Writes My Location into the Start field and the POI into the End
-// field, then triggers compute via setEndpoint's auto-route.
-
+// Called by popups.js when the "Go" button inside a POI popup is clicked.
 export function routeFromMyLocationTo(lon, lat, label) {
   const state = state_holder.current;
   if (!state || !state.graph) return;
@@ -240,20 +195,16 @@ function applyMyLocationAsStart(state) {
 // ---------- map sources / layers ----------
 
 function addRouteSources(map, state) {
-  // Insert route layers BELOW bike infrastructure (so green/orange paint
-  // strips show through where the route follows them — easier to see
-  // which segments are on AAA, BBL, etc.). `kc-regional-trails` is the
-  // bottom-most bike-infra layer per layers.js; if it's not in the
-  // style yet, fall through to top-of-stack as before.
+  // Route layers go below bike infrastructure (so green tier paint shows
+  // through). `kc-regional-trails` is the bottom bike-infra layer.
   const beforeId = map.getLayer('kc-regional-trails') ? 'kc-regional-trails' : undefined;
 
-  // All four route layers share the wider width — primary and alts read
-  // alike at a glance, with color (saturation vs. softness) being the
-  // visual cue for which is active rather than thickness.
+  // Primary and alts share widths — color, not thickness, signals which
+  // route is active.
   const CASING_WIDTH = ['interpolate', ['linear'], ['zoom'], 10, 5,   16, 14];
   const LINE_WIDTH   = ['interpolate', ['linear'], ['zoom'], 10, 3.5, 16, 10];
 
-  // Alternates BELOW the primary (insertion order = render bottom-to-top).
+  // Alts go in first so the primary paints above them.
   map.addSource(ALT_SOURCE, { type: 'geojson',
     data: { type: 'FeatureCollection', features: [] } });
   map.addLayer({
@@ -294,8 +245,7 @@ function addRouteSources(map, state) {
     layout: { 'line-cap': 'round', 'line-join': 'round' },
   }, beforeId);
 
-  // Activate an alternate by clicking its line (same effect as clicking a
-  // tab in the directions panel).
+  // Click an alt line to promote it (same as clicking its tab).
   map.on('click', ALT_LINE, (e) => {
     if (isChoosingOnMap()) return;
     const altId = e.features?.[0]?.properties?.altId;
@@ -313,8 +263,7 @@ function addRouteSources(map, state) {
     map.getCanvas().style.cursor = '';
   });
 
-  // The ONLY way to set an endpoint by clicking the map is to be in
-  // choose-on-map mode for one of the inputs.
+  // Endpoint-by-map-click only works in choose-on-map mode.
   map.on('click', (e) => {
     const mode = getMode();
     if (!mode) return;
@@ -361,8 +310,7 @@ function setEndpoint(state, which, spec, lon, lat, label) {
   if (state.startSpec && state.endSpec) {
     compute(state);
   } else if (state.panel) {
-    // One endpoint pinned, one to go — keep the directions panel hidden
-    // (the green/red marker is its own affordance).
+    // Only one endpoint pinned so far — the marker is the affordance.
     state.panel.hidden = true;
   }
 }
@@ -379,9 +327,7 @@ function activeSliders(state) {
 }
 
 function compute(state) {
-  // Loading state: vertically-centered "Computing route" with animated
-  // ellipsis. Three separately-fading dots in spans (CSS animates each
-  // span's opacity at staggered delays).
+  // "Computing route…" with CSS-animated ellipsis dots.
   setPanel(state,
     '<div class="route-loading">'
     + '<span class="route-loading-text">Computing route</span>'
@@ -410,25 +356,20 @@ function compute(state) {
       state.routes = [];
       drawRoutes(state);
     } else {
-      // Annotate each route with its geometry index set (used for
-      // max-difference label placement on alts) and its stitched polyline.
+      // Cache stitched polyline + geom-index set per route for label
+      // placement on alts.
       state.routes = routes.map((r) => ({
         ...r,
         fullGeom: stitchGeometry(state.graph, r.result),
         geomSet: geomIndexSet(state.graph, r.result.pathEdgeIds),
       }));
-      state.activeIndex = 0;    // primary is active by default; tabs stay stable
+      state.activeIndex = 0;
       state.lastComputeMs = tMs;
       drawRoutes(state);
       renderPrimary(state);
     }
-    // On mobile, expand the sheet to "full" whenever compute finishes —
-    // so the user can see directions immediately after typing/selecting
-    // endpoints OR after a Choose-on-map flow (which had collapsed
-    // the sheet to peek so the user could see the map). Fired even on
-    // route-not-found so the error message is also visible. The double
-    // call (now + rAF) survives a stray keyboard-dismiss resize that
-    // could otherwise re-apply a stale snap state.
+    // Mobile: expand sheet so directions (or the no-path error) are
+    // visible. Double call survives a stray keyboard-dismiss resize.
     snapSheet('full');
     requestAnimationFrame(() => snapSheet('full'));
   }, 0);
@@ -464,9 +405,8 @@ function drawRoutes(state) {
                  properties: { altId: active.id } }],
   } : { type: 'FeatureCollection', features: [] });
 
-  // Alts = every route OTHER than the active one. We keep the original
-  // insertion order stable across promotions so the tab strip's positions
-  // don't shuffle when the user clicks a tab.
+  // Alts = every route other than the active one. Original insertion
+  // order is preserved so tab positions don't shuffle on promote.
   const inactiveIndices = state.routes
     .map((_, i) => i)
     .filter((i) => i !== state.activeIndex);
@@ -479,9 +419,8 @@ function drawRoutes(state) {
     type: 'FeatureCollection', features: altFeatures,
   });
 
-  // Floating midpoint labels on each alternate, placed where the alt
-  // actually diverges from the CURRENT active route (longest contiguous
-  // unique stretch).
+  // Floating label per alt, placed at the midpoint of its longest
+  // contiguous divergence from the active route.
   for (const m of state.altMarkers) m.remove();
   state.altMarkers = [];
   const activeGeomSet = active?.geomSet;
@@ -504,10 +443,8 @@ function drawRoutes(state) {
   }
 }
 
-/** Pick a label position for an alt: the midpoint of the alt's longest
- *  contiguous run of edges whose geometry index is NOT in the primary's
- *  geom set. If the alt overlaps the primary entirely (shouldn't happen
- *  per the similarity filter), fall back to the route midpoint. */
+/** Midpoint of the alt's longest contiguous run of edges not shared
+ *  with the active route. Falls back to overall route midpoint. */
 function labelPositionFor(graph, altRoute, primaryGeomSet) {
   const eids = altRoute.result.pathEdgeIds;
   if (!eids?.length) return null;
@@ -528,7 +465,6 @@ function labelPositionFor(graph, altRoute, primaryGeomSet) {
     }
   }
   if (bestStart < 0) return midpointOf(altRoute.fullGeom);
-  // Midpoint of the unique-run edges by length-weighted geometry.
   const segCoords = [];
   for (let i = bestStart; i <= bestEnd; i++) {
     const edge = graph.edge(eids[i]);
@@ -559,8 +495,7 @@ function midpointOf(geom) {
 function setActiveRoute(state, routeId) {
   const idx = state.routes.findIndex((r) => r.id === routeId);
   if (idx < 0 || idx === state.activeIndex) return;
-  // We do NOT reorder state.routes — the tab strip needs stable positions
-  // across promotions. Only the "which is active" pointer moves.
+  // Only the active pointer moves; state.routes order is stable.
   state.activeIndex = idx;
   drawRoutes(state);
   renderPrimary(state);
@@ -605,13 +540,8 @@ function addStepMarkers(state, steps) {
 
 // ---------- chart ↔ map hover sync ----------
 //
-// Two-way: mousing over the elevation chart drops a pink dot on the map
-// at the matching route position; mousing over the active route LINE on
-// the map drops a cursor line on the chart at the matching distance.
-//
-// hoverSeries / hoverChartGeom are populated by elevationBlockHtml() each
-// time the active route is rendered, so the cursor is always in sync with
-// whatever route is currently shown.
+// state.hoverSeries / hoverChartGeom are populated by elevationBlockHtml
+// on each render; both hover handlers read from them.
 
 function ensureHoverMarker(state) {
   if (state.hoverMarker) return state.hoverMarker;
@@ -630,8 +560,7 @@ function hideHoverCursor(state) {
   panel.querySelector('.route-elev-cursor-label')?.setAttribute('hidden', '');
 }
 
-/** Move both cursors (map dot + chart line/dot/label) to the given
- *  distance along the active route. Either direction calls this. */
+/** Move map dot + chart cursor to the given distance along the route. */
 function moveHoverCursorToDist(state, distFt) {
   const series = state.hoverSeries;
   const geom = state.hoverChartGeom;
@@ -662,15 +591,10 @@ function moveHoverCursorToDist(state, distFt) {
   dot.setAttribute('cx', x.toFixed(1));
   dot.setAttribute('cy', y.toFixed(1));
   dot.removeAttribute('hidden');
-  // Three-line label stacked vertically: elev / distance / slope. The
-  // grade uses a smoothed window so a single noisy DEM segment doesn't
-  // dominate. Stacking keeps each line short (~6 chars) so the
-  // text-anchor="middle" rarely clips at the chart's left/right edges.
+  // Tooltip: three short lines (elev / mi / %) stacked at y=9,19,29
+  // sit entirely inside pad.t=32 so they never overlap the curve.
   const slope = slopeAtDistance(series, d);
   const pctStr = (slope >= 0 ? '+' : '') + (slope * 100).toFixed(1) + '%';
-  // 3 lines stacked at 10 px each. With pad.t = 32, lines at y = 9, 19,
-  // 29 sit entirely in the top padding above the elevation curve, so the
-  // tooltip never overlaps the plotted data.
   lbl.setAttribute('y', '9');
   lbl.querySelector('.route-elev-cursor-elev').setAttribute('x', x.toFixed(1));
   lbl.querySelector('.route-elev-cursor-mi'  ).setAttribute('x', x.toFixed(1));
@@ -701,10 +625,7 @@ function attachChartHoverHandlers(state) {
   svg.addEventListener('mouseleave', () => hideHoverCursor(state));
 }
 
-/** One-time wiring: hovering the active route LINE on the map drives the
- *  same cursor sync. Called once from initRoutingUI(); it stays bound for
- *  the life of the page and reads `state.hoverSeries` (refreshed on each
- *  route render) so it always reflects the current active route. */
+/** Bind once at boot; reads state.hoverSeries (refreshed per render). */
 function attachMapHoverHandlers(state) {
   const map = state.map;
   if (!map) return;
@@ -719,21 +640,13 @@ function attachMapHoverHandlers(state) {
 }
 
 function infraBreakdown(graph, edgeIds) {
-  // Bucket each edge's length by routing category. Used to render the
-  // per-route infrastructure bar.
-  //   - AAA          : facility ∈ {BKF-NGW, BKF-PBL, BKF-OFFST}
-  //   - Other bike   : split into BBL / BL / sharrow-or-climbing so the
-  //                    bar can render their three colors in proportion
-  //   - Local streets: no facility AND no centerline (≈ residential)
-  //   - Major streets: no facility AND has centerline (arterial/collector)
-  //   - Sidewalk     : OSM footway=sidewalk|crossing (gray)
+  // Bucket each edge by tier. Local = no facility + no centerline;
+  // Major = no facility + has centerline. AAA covers NGW/PBL/OFFST;
+  // BBL/BL/SHW each get their own bar color under "Other bike".
   let aaa = 0, bbl = 0, bl = 0, shw = 0, local = 0, major = 0, sidewalk = 0, total = 0;
   for (const eid of edgeIds) {
     const len = graph.edgeLengthFt(eid);
     total += len;
-    // Sidewalks short-circuit ahead of facility classification (a
-    // sidewalk should never inherit AAA paint anyway, but we re-assert
-    // it here so the bar is consistent with the routing logic).
     if (graph.edgeIsSidewalk(eid)) { sidewalk += len; continue; }
     const fac = graph.edgeFacility(eid);
     if (fac === 'BKF-NGW' || fac === 'BKF-PBL' || fac === 'BKF-OFFST') aaa += len;
@@ -746,10 +659,8 @@ function infraBreakdown(graph, edgeIds) {
   return { aaa, bbl, bl, shw, local, major, sidewalk, total };
 }
 
-// Sub-segment fill colors — MUST stay in sync with the per-tier line
-// colors in src/layers.js so the bar reads as the same legend as the map.
-// "Local streets" is white (rendered with a thin gray stroke so it's
-// visible against the white panel); "Major streets" is a muted red.
+// Keep in sync with the per-tier line colors in src/layers.js. Local is
+// white (gray-stroked); Major is muted red.
 const INFRA_COLORS = {
   aaa:      '#1F6B3D',
   bbl:      '#3FA85F',
@@ -769,36 +680,22 @@ const INFRA_GROUP_META = {
 };
 
 function infraSummaryBarSvg(b, vbWidth = 320) {
-  // Render the breakdown as a horizontal bar:
-  //   [AAA | BBL | BL | SHW | LOCAL | MAJOR | SIDEWALK]
-  // Each category gets a label connected to its bar segment by an L-line.
-  // Labels sit above the bar (`pos: 'top'`) or below (`pos: 'bot'`).
+  // Horizontal bar [AAA | BBL | BL | SHW | LOCAL | MAJOR | SIDEWALK]
+  // with each category labeled via an L-connector above or below.
   //
-  // Layout strategy (single row per side):
-  //   1. Label x-placement: each label starts at its bar-segment center.
-  //      Then we run a symmetric repulsion relaxation — for each pair
-  //      with overlapping x-extents we push both members apart by half
-  //      of the overlap, then clamp to the viewBox. Iterate until
-  //      stable. This distributes displacement across both sides of an
-  //      overlap rather than letting one label accumulate the full push.
-  //   2. Connector defaults: each connector has the original midY
-  //      (midpoint between the bar edge and the label-glyph edge).
-  //   3. Connector overlap resolution: if two connectors on the same
-  //      side end up with horizontal mid-segments at the same y and
-  //      x-overlapping, we nudge one a few px toward the label and the
-  //      other a few px toward the bar. Iterate until separated.
+  // Layout: labels x-place by symmetric repulsion from their segment
+  // center (each overlap pushes both sides by half, clamp to viewBox,
+  // iterate). Connector midY assignments are then exhaustively
+  // searched (see optimizeMidYs) to minimize crossings.
   //
-  // `vbWidth` is the SVG's RENDERED PIXEL WIDTH and is also used as the
-  // viewBox width, so 1 viewBox unit = 1 screen pixel. Result: font
-  // size and bar height stay constant regardless of container width;
-  // only the bar's horizontal extent stretches.
+  // vbWidth is both pixel width and viewBox width — 1:1 mapping keeps
+  // font-size and bar height constant across container widths.
   if (!b.total) return '';
   const VB_W = vbWidth;
   const PAD_X = 6;
   const BAR_X0 = PAD_X, BAR_X1 = VB_W - PAD_X;
   const BAR_W = BAR_X1 - BAR_X0;
 
-  // Walk the sub-segments left-to-right and assign x ranges.
   const subs = [
     { k: 'aaa',      ft: b.aaa,            group: 'aaa'      },
     { k: 'bbl',      ft: b.bbl,            group: 'other'    },
@@ -816,7 +713,6 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
     s.x1 = cursor;
   }
 
-  // One group per category (skipped if its total length is 0).
   const groups = [];
   for (const g of Object.keys(INFRA_GROUP_META)) {
     const ss = subs.filter((s) => s.group === g && s.w > 0);
@@ -825,9 +721,7 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
     const x1 = Math.max(...ss.map((s) => s.x1));
     const ft = ss.reduce((acc, s) => acc + s.ft, 0);
     const pct = Math.round(100 * ft / b.total);
-    // Sub-1% categories show as "<1%" rather than rounded to 0% — a
-    // sliver that contributes any nonzero distance is still on the
-    // route, and the user should see it called out as such.
+    // Any nonzero presence on the route renders as "<1%" rather than 0%.
     const pctText = pct === 0 ? '<1%' : `${pct}%`;
     groups.push({
       g, x0, x1, center: (x0 + x1) / 2,
@@ -838,13 +732,12 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
     });
   }
 
-  // Label width estimate (9.5px sans ≈ 5.3 px/char) for collision tests.
+  // Label-width estimate for collision tests (~5.3 px/char at 9.5 px).
   for (const grp of groups) {
     const estW = grp.label.length * 5.3 + 4;
     grp.halfW = estW / 2;
   }
 
-  // Geometry: single row per side at the ORIGINAL y positions.
   const hasTop = groups.some((g) => g.pos === 'top');
   const hasBot = groups.some((g) => g.pos === 'bot');
   const TOP_ZONE = hasTop ? 32 : 4;
@@ -856,9 +749,6 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
   const TOP_BASELINE = 12;
   const BOT_BASELINE = BAR_Y1 + 28;
 
-  // Symmetric repulsion: push half of each overlap onto each member,
-  // clamp to viewBox edges, iterate until stable (or capped). Works
-  // for any label widths and any number of labels per side.
   function placeLabels(side) {
     const ls = groups.filter((g) => g.pos === side).sort((a, b) => a.center - b.center);
     for (const l of ls) l.labelX = l.center;
@@ -883,7 +773,6 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
   const topLabels = placeLabels('top');
   const botLabels = placeLabels('bot');
 
-  // Sub-segment rects.
   const segRects = subs.filter((s) => s.w > 0).map((s) => {
     const stroke = s.k === 'local'
       ? ' stroke="#bbb" stroke-width="0.5"' : '';
@@ -893,30 +782,26 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
          + `fill="${INFRA_COLORS[s.k]}"${stroke}/>`;
   }).join('');
 
-  // Build connector data per label. Each connector has a horizontal
-  // mid-segment running between segCenter and labelX at y = midY. The
-  // midY is constrained to [yMin, yMax]; we start at the default
-  // midpoint and nudge in resolveConnectorOverlaps if needed.
+  // Connector: a horizontal mid-segment at y=midY between segCenter
+  // and labelX. midY is constrained to [yMin, yMax]; optimizeMidYs
+  // picks the per-connector level that minimizes crossings.
   function buildConn(grp) {
     const cx = grp.center, lx = grp.labelX;
     if (grp.pos === 'top') {
-      const ly = TOP_BASELINE + 3;            // just below the label glyph
-      const yMin = BAR_Y0 + 2;                // just below bar top
-      const yMax = ly - 1;                    // just above label edge
+      const ly = TOP_BASELINE + 3;
+      const yMin = BAR_Y0 + 2;
+      const yMax = ly - 1;
       const midY = (ly + BAR_Y0) / 2;
       return { grp, ly, anchorY: BAR_Y0, midY, yMin, yMax,
                xMin: Math.min(cx, lx), xMax: Math.max(cx, lx) };
     }
-    const ly = BOT_BASELINE - 11;             // just above the label top
+    const ly = BOT_BASELINE - 11;
     const yMin = BAR_Y1 + 2;
     const yMax = ly - 1;
     const useBracket = (grp.g === 'other' && grp.multi);
-    // The "other" T-bracket sits closer to the bar by default; the
-    // others sit at the midpoint between bar and label.
+    // The "other" T-bracket spans BBL+BL+SHW; it sits closer to the bar.
     const midY = useBracket ? (BAR_Y1 + 3) : (BAR_Y1 + ly) / 2;
     return { grp, ly, anchorY: BAR_Y1, midY, yMin, yMax,
-             // Horizontal extent: full BBL+BL+SHW span for the bracket,
-             // segCenter→labelX for the simple connectors.
              xMin: useBracket ? grp.x0 : Math.min(cx, lx),
              xMax: useBracket ? grp.x1 : Math.max(cx, lx),
              useBracket };
@@ -924,26 +809,17 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
   const topConns = topLabels.map(buildConn);
   const botConns = botLabels.map(buildConn);
 
-  // Build the geometry of each connector as a list of line segments
-  // (used for crossing detection). The L-shape connector emits
-  //   - 1 horizontal at y=midY, x in [min(cx,lx), max(cx,lx)]
-  //   - 2 verticals (cx leg between bar anchor and midY; lx leg
-  //                  between midY and label edge)
-  // The T-bracket "Other bike" multi connector emits
-  //   - 2 horizontals (the bracket at midY across the full BBL+BL+SHW
-  //                    span, plus the stem horizontal between cx and lx)
-  //   - 2 verticals (cx leg between midY and stemMidY; lx leg between
-  //                  stemMidY and label edge)
-  // Note brackets have no leg up to the bar — they hang in the air
-  // visually just below the bar.
+  // Connector decomposed into line segments for crossing detection.
+  // L-shape: 1 horizontal + 2 verticals. T-bracket (multi "other"):
+  // 2 horizontals + 2 verticals; no leg up to the bar.
   function buildSegments(c) {
     const cx = c.grp.center, lx = c.grp.labelX;
     if (c.useBracket) {
       const stemMid = (c.midY + c.ly) / 2;
       return {
         horiz: [
-          { y: c.midY,  xMin: c.grp.x0, xMax: c.grp.x1 },                     // bracket
-          { y: stemMid, xMin: Math.min(cx, lx), xMax: Math.max(cx, lx) },     // stem horiz
+          { y: c.midY,  xMin: c.grp.x0, xMax: c.grp.x1 },
+          { y: stemMid, xMin: Math.min(cx, lx), xMax: Math.max(cx, lx) },
         ],
         verts: [
           { x: cx, yMin: Math.min(c.midY, stemMid), yMax: Math.max(c.midY, stemMid) },
@@ -962,9 +838,8 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
     };
   }
 
-  // Count visible crossings between two connectors. Counts every
-  // vertical-leg × horizontal-segment intersection plus any same-y
-  // horizontal-horizontal overlap.
+  // Count vertical×horizontal intersections plus same-y horizontal
+  // overlaps between two connectors.
   function pairCrossings(c1, c2) {
     const a = buildSegments(c1);
     const b = buildSegments(c2);
@@ -987,22 +862,12 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
     return n;
   }
 
-  // Exhaustively search discrete midY assignments for the combination
-  // with the fewest crossings. With at most ~5 connectors per side
-  // (aaa/local on top; other/major/sidewalk on bot) and 5 candidate
-  // levels per connector, that's ≤ 5^5 = 3,125 evaluations — trivial.
-  // Each connector's allowed range is [yMin, yMax]; we sample 5 evenly
-  // spaced levels including the default midpoint.
-  //
-  // Tiebreak: prefer assignments with less total perturbation from the
-  // default midY (avoids gratuitous movement when crossings are tied).
-  // This is the core fix for the "all heights differ but two
-  // connectors still cross" case — a swap of two midYs often clears
-  // the crossing, and exhaustive search picks it up.
+  // Exhaustive search of 5 levels per connector (≤ 5^5 = 3,125 evals).
+  // Score = crossings × 1e6 + total perturbation from default midY, so
+  // ties break toward minimal movement.
   function optimizeMidYs(conns) {
     if (conns.length <= 1) return;
     const N_LEVELS = 5;
-    // Stash defaults for the perturbation tiebreaker.
     for (const c of conns) c._defaultMidY = c.midY;
     const levelsPer = conns.map((c) => {
       const out = [];
@@ -1036,7 +901,6 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
   optimizeMidYs(topConns);
   optimizeMidYs(botConns);
 
-  // Connector lines + label text.
   const parts = [];
   const allConns = [...topConns, ...botConns];
   for (const c of allConns) {
@@ -1050,8 +914,6 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
     } else {
       const ly = c.ly;
       if (c.useBracket) {
-        // T-bracket spans the BBL+BL+SHW range at `midY`; the stem
-        // drops to a halfway point and then to the label x.
         const bracketY = midY;
         const stemMidY = (bracketY + ly) / 2;
         parts.push(`<polyline points="${grp.x0.toFixed(2)},${bracketY.toFixed(2)} ${grp.x1.toFixed(2)},${bracketY.toFixed(2)}" class="route-infra-line"/>`);
@@ -1063,9 +925,8 @@ function infraSummaryBarSvg(b, vbWidth = 320) {
     }
   }
 
-  // Explicit width/height attrs (in pixels) — the SVG renders 1:1 with
-  // the viewBox, so font-size and bar height stay constant. CSS sets
-  // `width: 100%` to 0, so the inline attribute wins. See style.css.
+  // Inline width/height in pixels; viewBox is 1:1 so font-size and bar
+  // height stay constant across container widths.
   return `<svg class="route-infra-bar" `
        + `width="${VB_W}" height="${VB_H}" `
        + `viewBox="0 0 ${VB_W} ${VB_H}" `
@@ -1081,24 +942,14 @@ function elevationBlockHtml(state, route, vbWidth = 320) {
   const series = buildElevationSeries(state.graph, route.result);
   if (!series || series.elevations.length < 2) return '';
   const stats = climbStats(series);
-  // vbWidth is the chart's actual pixel width AND its viewBox width
-  // (1:1) so font-size and chart height stay constant regardless of
-  // container width.
   const svg = elevationProfileSvg(series, { width: vbWidth });
   if (!svg.area) return '';
-  // Stash on state so hover handlers can find it.
+  // Stashed for hover handlers (chart + map).
   state.hoverSeries = series;
   state.hoverChartGeom = {
     width: svg.width, height: svg.height, pad: svg.pad,
     minElev: svg.minElevFt, maxElev: svg.maxElevFt, totalDist: svg.totalDistFt,
   };
-  // SVG chart: filled brown area under a darker outline. Min/max elevation
-  // labels on the y-axis; total distance is on the directions summary so
-  // the x-axis is implicit. Steepest-grade + total-uphill stats sit
-  // alongside the chart.
-  // The cursor (vertical line + circle) starts hidden and is moved by
-  // the hover handler in attachElevHover() — both chart-mouse and
-  // map-mouse trigger it.
   const pad = svg.pad;
   const baseline = svg.height - pad.b;
   return `
@@ -1134,16 +985,8 @@ function elevationBlockHtml(state, route, vbWidth = 320) {
 
 // ---------- destination bike-parking block ----------
 //
-// Renders a small "P" badge + summary right above the turn-by-turn step
-// list. The badge color is a traffic-light tier based on the closest
-// public bike rack (from the bicycle_racks SDOT layer) to the route's
-// final coordinate:
-//   green  — at least one rack within RACK_GREEN_FT
-//   yellow — closest rack within RACK_YELLOW_FT (gives bearing + dist)
-//   red    — no rack within RACK_YELLOW_FT
-//
-// Uses haversine distance on raw lon/lat. The bike-rack source is loaded
-// once into state at app boot (same Promise.all as the graph + signs).
+// "P" badge above the step list, tiered green/yellow/red on the closest
+// public bike rack from bicycle_racks.geojson (haversine distance).
 
 const FT_PER_METER_RACK = 3.28084;
 const EARTH_RADIUS_M = 6371000;
@@ -1171,7 +1014,6 @@ function bearingDegRack(lon1, lat1, lon2, lat2) {
 }
 
 function compass8(bearingDeg) {
-  // 8-sector compass, 45° wide each, centered on the cardinal.
   const dirs = ['north', 'northeast', 'east', 'southeast',
                 'south', 'southwest', 'west', 'northwest'];
   const idx = Math.floor(((bearingDeg + 22.5) % 360) / 45);
@@ -1181,10 +1023,8 @@ function compass8(bearingDeg) {
 function bikeRackInfoForDestination(state, destLon, destLat) {
   const feats = state.bikeRacks?.features;
   if (!feats || !feats.length) return null;
-  // Quick lat/lon bbox prefilter — 1000 ft ~ 305 m. At Seattle's
-  // latitude 1° lat ≈ 364,000 ft, 1° lon ≈ 247,000 ft. Use a generous
-  // 1° / 200 ≈ 1,800 ft window (well past RACK_YELLOW_FT) so we never
-  // miss the nearest rack to a haversine roundoff edge case.
+  // Bbox prefilter at Seattle's latitude (1° lat ≈ 364,000 ft,
+  // 1° lon ≈ 247,000 ft).
   const latRange = RACK_YELLOW_FT / 364000;
   const lonRange = RACK_YELLOW_FT / 247000;
   let closestFt = Infinity;
@@ -1230,9 +1070,7 @@ function bikeRackBlockHtml(info) {
 }
 
 function renderDirections(state, info) {
-  // Tab strip — only when >1 route is showing. Active tab = currently
-  // primary route. Clicking a tab swaps which route is primary (same as
-  // clicking the route on the map).
+  // Tab strip only when >1 route is showing.
   let tabsHtml = '';
   if (state.routes.length > 1) {
     tabsHtml = `<ul class="route-tabs">${state.routes.map((r, i) => {
@@ -1246,17 +1084,10 @@ function renderDirections(state, info) {
     }).join('')}</ul>`;
   }
   const miles = info.totalLengthFt / 5280;
-  // Infrastructure bar for the ACTIVE route, always shown under the
-  // min/mi line in the summary block. (Lives outside the tab strip so it
-  // doesn't bloat every tab and stays tied to the route that's actually
-  // rendered as primary.)
   const activeRoute = state.routes[state.activeIndex];
   const mins = predictedMinutes(state, activeRoute);
-  // Both summary SVGs render at the directions panel's actual inner
-  // width, with viewBox-W = pixel-W (1:1), so their font-size and
-  // height stay constant across phone/desktop. See infraSummaryBarSvg
-  // and elevationBlockHtml. Cached on state so the resize handler can
-  // re-render if the panel width changes meaningfully.
+  // Summary SVGs render at the panel's measured width with viewBox 1:1
+  // so font-size and height stay constant. Cached for the resize handler.
   const svgWidth = directionsPanelInnerWidth(state);
   state.lastDirectionsWidth = svgWidth;
   const summaryPct = activeRoute
@@ -1271,8 +1102,6 @@ function renderDirections(state, info) {
     </div>
     ${elevHtml}`;
 
-  // Destination bike-parking block — green/yellow/red P badge + message
-  // based on the closest public bike rack to the route end.
   let rackHtml = '';
   if (activeRoute && activeRoute.fullGeom?.length) {
     const end = activeRoute.fullGeom[activeRoute.fullGeom.length - 1];
@@ -1294,7 +1123,6 @@ function renderDirections(state, info) {
 
   setPanel(state, tabsHtml + summary + rackHtml + `<ol class="route-steps">${stepsHtml}</ol>`);
 
-  // Wire tab clicks to activate.
   if (tabsHtml) {
     state.panel.querySelectorAll('.route-tab').forEach((tab) => {
       tab.addEventListener('click', () => {
@@ -1303,9 +1131,7 @@ function renderDirections(state, info) {
       });
     });
   }
-  // Wire the chart-hover handler each render (the SVG is re-built every
-  // time the panel rerenders). The map-hover handler is bound once at
-  // boot and reads state.hoverSeries — refreshed by elevationBlockHtml.
+  // Chart SVG is rebuilt on every render, so rebind its hover handler.
   attachChartHoverHandlers(state);
 }
 
@@ -1315,38 +1141,25 @@ function setPanel(state, html) {
   state.panel.innerHTML = html;
 }
 
-// Pixel width to render the summary SVGs at. Used as both the SVG's
-// `width` attribute and its viewBox width, so 1 viewBox unit = 1
-// screen pixel — font-size and bar/chart heights stay constant across
-// desktop and phone widths.
-//
-// Prefer the panel's measured clientWidth; fall back to the panel
-// container width before first paint. The values are clamped so a
-// transient 0 (e.g. while #directions-panel is still hidden=true)
-// doesn't render a zero-width SVG.
+// Panel width used as both SVG pixel-width and viewBox-width (1:1).
+// renderDirections sets hidden=false AFTER this runs, so we temporarily
+// un-hide to measure, then restore.
 function directionsPanelInnerWidth(state) {
   if (state.panel) {
-    // Force layout-known geometry: ensure panel is visible before
-    // measuring. (`renderDirections` flips `hidden = false` via setPanel
-    // AFTER computing this width, so we have to peek manually here.)
     const wasHidden = state.panel.hidden;
     if (wasHidden) state.panel.hidden = false;
     const measured = state.panel.clientWidth;
     if (wasHidden) state.panel.hidden = true;
     if (measured >= 200) return measured;
   }
-  // Fallback when we can't measure (e.g. boot): use the known #left-stack
-  // width on desktop, viewport minus sheet padding on mobile.
   if (window.matchMedia('(max-width: 719px)').matches) {
     return Math.max(280, window.innerWidth - 20);
   }
   return 360;
 }
 
-// Re-render the active route's panel when the viewport resizes if the
-// directions-panel width changed meaningfully. Without this, the SVGs
-// would keep their initial-render width (fine on desktop, but rotating
-// a phone or dragging the window would leave them mis-sized).
+// Re-render the panel when the viewport resize changes its width by
+// >= 4 px (deadband avoids thrashing on mobile-keyboard show/hide).
 function attachDirectionsResizeHandler(state) {
   let pending = 0;
   window.addEventListener('resize', () => {
@@ -1355,9 +1168,6 @@ function attachDirectionsResizeHandler(state) {
       pending = 0;
       if (!state.routes.length) return;
       const w = directionsPanelInnerWidth(state);
-      // Skip re-render unless the width drifted enough to matter (>= 4 px).
-      // This keeps mobile-keyboard-show events and other tiny resizes
-      // from thrashing the panel.
       if (Math.abs((state.lastDirectionsWidth ?? 0) - w) < 4) return;
       renderPrimary(state);
     });
@@ -1384,8 +1194,7 @@ function resetRoute(state) {
   if (state.panel) state.panel.hidden = true;
 }
 
-// Clear just one endpoint (Start or End). Drops the route + step markers
-// since the remaining single pin can't form a route on its own.
+// Clear just one endpoint. The remaining single pin can't route.
 function clearEndpoint(state, which) {
   if (which === 'start') {
     if (state.startMarker) { state.startMarker.remove(); state.startMarker = null; }
@@ -1409,8 +1218,7 @@ function clearEndpoint(state, which) {
   if (state.panel) state.panel.hidden = true;
 }
 
-// Swap Start and End endpoints. Marker color must match its new role, so
-// we recreate the markers (MapLibre Marker has no setColor).
+// MapLibre Marker has no setColor, so role-swapped markers are recreated.
 function swapEndpoints(state) {
   if (!state.startSpec && !state.endSpec) return;
   const sSpec = state.startSpec, sLabel = state.startLabel;
@@ -1420,7 +1228,6 @@ function swapEndpoints(state) {
   state.startMarker?.remove(); state.startMarker = null;
   state.endMarker?.remove();   state.endMarker = null;
 
-  // Old end → new start.
   state.startSpec = eSpec; state.startLabel = eLabel;
   setInputValue('route-start-input', eLabel || '');
   if (eSpec && eLngLat) {
@@ -1428,7 +1235,6 @@ function swapEndpoints(state) {
       .setLngLat([eLngLat.lng, eLngLat.lat]).addTo(state.map);
   }
 
-  // Old start → new end.
   state.endSpec = sSpec; state.endLabel = sLabel;
   setInputValue('route-end-input', sLabel || '');
   if (sSpec && sLngLat) {
@@ -1439,7 +1245,7 @@ function swapEndpoints(state) {
   if (state.startSpec && state.endSpec) {
     compute(state);
   } else {
-    // Only one endpoint left — drop any stale route artifacts.
+    // Only one endpoint — drop any stale route artifacts.
     for (const m of state.stepMarkers) m.remove();
     for (const m of state.altMarkers)  m.remove();
     state.stepMarkers = []; state.altMarkers = [];
@@ -1458,13 +1264,9 @@ function swapEndpoints(state) {
 
 function startUserLocationTracking(state) {
   if (!('geolocation' in navigator)) return;
-  // Run two watchers in parallel: a high-accuracy one (GPS, when
-  // available) and a low-accuracy fallback (WiFi/IP). The low-accuracy
-  // watcher catches the indoor case where the GPS-only watcher
-  // silently fails to ever fire a success. Whichever fires first
-  // populates `state.userLocation`; subsequent updates overwrite it,
-  // and the GPS one (when working) is more accurate, so it wins as
-  // soon as it lands.
+  // Two parallel watchers: high-accuracy (GPS) + low-accuracy
+  // (WiFi/IP). The low-accuracy one covers the indoor case where the
+  // GPS-only watcher silently never fires.
   const startWatcher = (opts, label) => {
     try {
       return navigator.geolocation.watchPosition(
@@ -1503,20 +1305,8 @@ function updateUserLocation(state, pos) {
   }
 }
 
-// One-shot location request used when the user picks "My location" or
-// the popup Go button before the watcher has produced a fix. Resolves to
-// the new userLocation or null on failure / denial.
-//
-// Robustness layers (most failures hit one of these):
-//   1. If the background `watchPosition` watcher already has a recent
-//      fix on `state.userLocation`, use it immediately — no new
-//      browser call needed.
-//   2. Try high-accuracy GPS with a short timeout.
-//   3. On failure (most often: indoors, no GPS hardware, GPS cold-
-//      start), fall back to low-accuracy positioning which uses WiFi
-//      / IP-based location. This is what fixes the sporadic "permission
-//      is on but location fails" case — the high-accuracy provider
-//      times out while the low-accuracy one succeeds.
+// One-shot location used by "My location" picks and the popup Go
+// button. Tries cached → high-accuracy → low-accuracy in that order.
 function requestLocationOnce(state) {
   return new Promise((resolve) => {
     if (!('geolocation' in navigator)) { resolve(null); return; }
@@ -1546,9 +1336,8 @@ function requestLocationOnce(state) {
   });
 }
 
-// Snap state.userLocation to the graph and pin it as the named endpoint.
-// Returns true on success; on failure sets state.locationError so the
-// endpoint dropdown can surface it as the "My location" subtext.
+// Snap state.userLocation to the graph and pin it as the endpoint.
+// On failure sets state.locationError for the dropdown subtext.
 function applyUserLocationAsEndpoint(state, which) {
   const u = state.userLocation;
   if (!u) {
@@ -1565,18 +1354,11 @@ function applyUserLocationAsEndpoint(state, which) {
   return true;
 }
 
-// Time estimate (minutes) for a computed route. Routing is unaffected —
-// these adjustments are display-only.
-//
-// Components:
-//   - Base riding time at the user's stated speed for non-sidewalk
-//     distance, plus a 5 mph cap on any sidewalk distance regardless
-//     of the user's speed.
-//   - +2 s per ft of total climb, −0.5 s per ft of total descent (no
-//     grade-dependent term — just total ascent/descent).
-//   - +10 s per traffic signal at an interior node of the path.
-//   - +2 s per stop sign at an interior node facing the cyclist's
-//     direction of travel (the end-bearing of the incoming edge).
+// Display-only ETA (routing cost ignores this).
+//   base / mph + sidewalk / 5 mph
+//   + 2 s/ft climb − 0.5 s/ft descent
+//   + 10 s per interior-node signal + 2 s per interior-node stop sign
+//     facing the cyclist's bearing.
 function predictedMinutes(state, route) {
   const sec = predictedSeconds(state, route);
   return Math.max(1, Math.round(sec / 60));
@@ -1588,10 +1370,9 @@ function predictedSeconds(state, route) {
   if (!graph || !r) return 0;
   const mph = Math.max(0.1, state.speedMph);
 
-  // Sidewalk vs non-sidewalk distance. Prefix/suffix never land on
-  // sidewalks (findNearestEdgeProjection skips them), so subtracting
-  // sidewalk-edge length from totalLengthFt leaves all non-sidewalk
-  // distance — including the mid-edge prefix/suffix slices.
+  // Prefix/suffix never land on sidewalks (findNearestEdgeProjection
+  // skips them), so total − sidewalkFt is the non-sidewalk distance
+  // including any mid-edge slices.
   let sidewalkFt = 0;
   for (const eid of r.pathEdgeIds) {
     if (graph.edgeIsSidewalk(eid)) sidewalkFt += graph.edgeLengthFt(eid);
@@ -1684,10 +1465,8 @@ function setupSearchInput(state, inputId, dropId, opts) {
     ];
   };
 
-  // Re-render the dropdown with the latest option rows (used when the
-  // pending state of a "My location" pick resolves). No-op when the
-  // dropdown isn't showing options (the user has typed a query and is
-  // now looking at address hits — don't yank the rug).
+  // Re-render option rows when a "My location" pick's state changes.
+  // No-op when the dropdown is showing search hits (don't yank the rug).
   const refreshOptionRows = () => {
     if (drop.hidden) return;
     if (!currentRows.length || currentRows[0].type !== 'mylocation') return;
@@ -1704,7 +1483,7 @@ function setupSearchInput(state, inputId, dropId, opts) {
         applyUserLocationAsEndpoint(state, opts.which);
         return;
       }
-      // No fix yet — keep the dropdown open and show "Locating…" inline.
+      // No fix yet — show "Locating…" inline while we request one.
       state.locationPending = true;
       state.locationError = null;
       currentRows = optionRows();
@@ -1713,13 +1492,11 @@ function setupSearchInput(state, inputId, dropId, opts) {
         state.locationPending = false;
         if (!state.userLocation) {
           state.locationError = 'Couldn’t get your location';
-          // Refresh whichever endpoint dropdown is currently focused
-          // (the user may have already moved to the other input).
+          // User may have moved to the other input by now.
           state.locationDropdownRefresh?.();
           return;
         }
-        // Success — if the user is still here, apply; otherwise just
-        // leave the new fix available for next time.
+        // Apply only if the user is still on this dropdown.
         if (drop.hidden || !currentRows[0] || currentRows[0].type !== 'mylocation') {
           state.locationError = null;
           return;
@@ -1789,10 +1566,7 @@ function setupSearchInput(state, inputId, dropId, opts) {
   };
 
   input.addEventListener('focus', () => {
-    // On mobile: expand the bottom sheet so the suggestion dropdown has
-    // room to render inside the sheet's scrollable area. Only meaningful
-    // for the routing-endpoint inputs; the settings inputs are inside
-    // their own modal.
+    // Mobile: expand sheet so the dropdown has room inside it.
     if (opts.role === 'endpoint') snapSheet('full');
     // Let async location callbacks re-render this dropdown while open.
     if (opts.role === 'endpoint') state.locationDropdownRefresh = refreshOptionRows;
@@ -1896,8 +1670,7 @@ function beginChooseOnMap(state, which) {
   setMode({ which });
   document.body.classList.add('choosing-on-map');
   showChooseBanner(which);
-  // On mobile, collapse the sheet so the user can actually see the map
-  // they need to tap.
+  // Mobile: collapse sheet so the map is visible for the tap.
   snapSheet('peek');
 }
 
@@ -1973,8 +1746,7 @@ function wireSettingsModal(state) {
     setInputValue('settings-work-input', '');
   });
 
-  // Routing debug: gates the "Routing debug" fieldset in #layers-panel
-  // and force-clears all 5 toggles when disabled.
+  // Gates #layers-debug-section and force-clears its toggles when off.
   const debugToggle = document.getElementById('settings-debug-enabled');
   if (debugToggle) {
     debugToggle.checked = state.debugEnabled;
@@ -1985,9 +1757,8 @@ function wireSettingsModal(state) {
     });
   }
 
-  // Custom route style: hidden in the segmented control unless the user
-  // opts in here. Disabling while Custom is the active preset falls back
-  // to Comfort so the visible buttons always reflect the active mode.
+  // Disabling while Custom is the active preset falls back to Comfort
+  // so the visible segmented buttons always reflect the active mode.
   const customToggle = document.getElementById('settings-custom-enabled');
   if (customToggle) {
     customToggle.checked = state.customEnabled;
@@ -2005,7 +1776,6 @@ function wireSettingsModal(state) {
     });
   }
 
-  // Average cycling speed.
   const speedInput = document.getElementById('settings-speed-input');
   const speedVal   = document.getElementById('settings-speed-val');
   if (speedInput && speedVal) {
@@ -2017,7 +1787,6 @@ function wireSettingsModal(state) {
     });
     speedInput.addEventListener('change', () => {
       saveSpeedToStorage(state.speedMph);
-      // If a route is showing, re-render the summary with the new ETA.
       if (state.routes.length > 0) renderPrimary(state);
     });
   }
@@ -2026,8 +1795,7 @@ function wireSettingsModal(state) {
 function applyCustomEnabledUI(state) {
   const seg = document.getElementById('preset-segmented');
   if (seg) seg.classList.toggle('custom-enabled', state.customEnabled);
-  // Sliders stay visible even when Custom is off so the user can see what
-  // they'll get if they enable it — but they're grayed out and inert.
+  // Sliders stay visible when Custom is off — grayed out and inert.
   const sliders = document.getElementById('custom-sliders');
   if (sliders) {
     sliders.hidden = false;
@@ -2038,13 +1806,11 @@ function applyCustomEnabledUI(state) {
   }
 }
 
-// Show/hide the routing-debug fieldset; when disabled, also uncheck all
-// 5 debug toggles (dispatching `change` so the VisibilityManager removes
-// each layer from view). Called both at boot and from the Settings
-// toggle's change handler.
+// Show/hide #layers-debug-section. When disabled, uncheck every debug
+// toggle and fire `change` so VisibilityManager drops each layer.
 function applyDebugEnabledUI(state, { forceClearOnDisable = false } = {}) {
-  const fs = document.getElementById('layers-debug-section');
-  if (fs) fs.hidden = !state.debugEnabled;
+  const section = document.getElementById('layers-debug-section');
+  if (section) section.hidden = !state.debugEnabled;
   if (!state.debugEnabled && forceClearOnDisable) {
     for (const id of DEBUG_TOGGLE_IDS) {
       const cb = document.getElementById(id);
@@ -2091,9 +1857,8 @@ function wirePresetUI(state) {
         }
       });
     });
-    // Sliders are built after wireSettingsModal ran, so the disabled/
-    // grayed state set there only landed on the container. Re-apply now
-    // that the inputs exist.
+    // Re-apply now that the slider inputs exist (wireSettingsModal ran
+    // before this, when only the container was present).
     applyCustomEnabledUI(state);
   }
 }
@@ -2104,10 +1869,8 @@ function setPresetUI(state) {
   });
 }
 
-// "Enable sidewalks" checkbox under the Comfort/Athletic segmented
-// control. Flipping it re-runs A* against the same endpoints with the
-// new `enableSidewalks` flag in the weights — long sidewalks (> 50 ft)
-// are gated by this; short ones (≤ 50 ft) stay routable either way.
+// "Enable sidewalks" gates long sidewalks (> 50 ft). Short ones
+// (≤ 50 ft) stay routable either way. Flipping re-runs A*.
 function wireSidewalksToggle(state) {
   const cb = document.getElementById('toggle-sidewalks');
   if (!cb) return;
@@ -2136,9 +1899,8 @@ function loadPresetFromStorage() {
 function savePresetToStorage(p) {
   try { localStorage.setItem(LS_PRESET, p); } catch {}
 }
-// Custom sliders open at a neutral midpoint (all 0.5) rather than
-// inheriting Athletic's values — gives the user a blank canvas to tune
-// from rather than starting them on one of the named presets.
+// Custom sliders open at a neutral 0.5 (not a named preset) so the
+// user starts from a blank canvas.
 const CUSTOM_DEFAULTS = { s1: 0.5, s2: 0.5, s3: 0.5, s4: 0.5, s5: 0.5 };
 function loadCustomFromStorage() {
   try {
@@ -2171,7 +1933,7 @@ function saveDebugEnabledToStorage(enabled) {
   try { localStorage.setItem(LS_DEBUG_ENABLED, enabled ? 'true' : 'false'); } catch {}
 }
 function loadSidewalksEnabledFromStorage() {
-  // Default ON for fresh users; respect an explicit prior off-toggle.
+  // Default ON; only an explicit prior "false" disables.
   try {
     const v = localStorage.getItem(LS_SIDEWALKS_ENABLED);
     if (v === 'false') return false;
@@ -2206,28 +1968,17 @@ function saveSpeedToStorage(mph) {
   try { localStorage.setItem(LS_SPEED, String(mph)); } catch {}
 }
 
-// ---------- graph debug layers (toggleable visualizations) ----------
+// ---------- graph debug layers (Street Slopes toggle) ----------
 //
-// Renders the routing graph as it actually sits in memory: every directed
-// edge as a line (deduped by underlying geometry index, so forward + reverse
-// share one feature) and every node as a small circle. Useful for spotting
-// snap targets, isolated trail islands, and edge-coverage gaps.
-//
-// Two layers share one edge source — both rendered only when the
-// Street Slopes checkbox is on (VisibilityManager group 'graph-debug'
-// in main.js):
-//   - graph-debug-edges  colored by absolute slope. Slope comes from the
-//                        resolved node elevations on each edge
-//                        endpoint, so it reflects the heat-eq-corrected
-//                        view on every flagged corridor and the raw
-//                        smoothed-DTM view elsewhere.
-//   - graph-debug-nodes  small dark-pink dots at every routing-graph
-//                        node, for spotting topology issues alongside
-//                        the slope edges.
+// Three layers share two sources, gated by VisibilityManager group
+// 'graph-debug' (see main.js):
+//   - graph-debug-edges          roads, solid, slope-colored
+//   - graph-debug-sidewalk-edges sidewalks, dashed, same color ramp
+//   - graph-debug-nodes          dark-pink dots at every node
 
 function addGraphDebugLayers(map, graph) {
-  // Walk all directed edges, dedupe by geomIndex, prefer the forward edge
-  // for each geom so slope sign matches the geometry's drawn direction.
+  // Dedupe by geomIndex; prefer the forward edge so slope sign matches
+  // the geometry's drawn direction.
   const geomToEdgeId = new Map();
   for (let i = 0; i < graph.edgeCount; i++) {
     const gIdx = graph.edgeGeomIndex(i);
@@ -2251,9 +2002,6 @@ function addGraphDebugLayers(map, graph) {
       geometry: { type: 'LineString', coordinates: graph.geoms[gIdx] },
       properties: {
         slopePct: Math.round(slopePct * 100) / 100,
-        // Used by the second layer's filter — sidewalks render as
-        // dashed lines (still slope-colored) so they're visibly
-        // distinguishable from on-street edges in the overlay.
         isSidewalk: graph.edgeIsSidewalk(edgeId),
       },
     });
@@ -2272,13 +2020,10 @@ function addGraphDebugLayers(map, graph) {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: edgeFeatures },
   });
-  // Color steps by |slopePct| in percent. Calibrated against Seattle's
-  // 26% steepest-real-street ceiling: ≥20% is "off-the-chart" purple,
-  // either a sustained real climb or a residual artifact at a hard-case
-  // multi-level junction where the heat eq smoothed across grade.
-  // Shared step-color expression for both road and sidewalk debug layers
-  // so the same slope reads the same color whether you're on a road or
-  // a sidewalk.
+  // Color steps by |slopePct|. Seattle's steepest real street is 26%,
+  // so ≥20% purple is either a sustained real climb or a heat-eq
+  // artifact at a multi-level junction. Shared by road + sidewalk
+  // layers so the same slope reads the same color.
   const SLOPE_COLOR = [
     'step', ['abs', ['get', 'slopePct']],
     '#dddddd',          // 0-1%   essentially flat
@@ -2291,7 +2036,7 @@ function addGraphDebugLayers(map, graph) {
   ];
   const SLOPE_WIDTH = ['interpolate', ['linear'], ['zoom'], 11, 0.8, 16, 2.0];
 
-  // Roads: solid lines.
+  // Roads: solid.
   map.addLayer({
     id: 'graph-debug-edges',
     type: 'line',
@@ -2304,11 +2049,8 @@ function addGraphDebugLayers(map, graph) {
     },
     layout: { visibility: 'none' },
   });
-  // Sidewalks: dashed, same color ramp. The dash pattern makes them
-  // visually distinguishable from on-street edges at a glance while
-  // still showing the slope-step color so the debug overlay reads as
-  // "everything in the routing graph, colored by slope." Dasharray is
-  // in line-widths, so the 2/2 pattern stays proportional at any zoom.
+  // Sidewalks: dashed (proportional 2/2 in line-widths) so they're
+  // visually distinguishable from on-street edges.
   map.addLayer({
     id: 'graph-debug-sidewalk-edges',
     type: 'line',

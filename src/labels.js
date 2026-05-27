@@ -1,9 +1,9 @@
 // Hand-rolled basemap label layers.
 //
 // @protomaps/basemaps@5.7.x ships no label layers — `layers()` returns only
-// fills/lines/background. The pmtiles we extracted does carry `name` on
-// roads, places, water, and POIs (verified via `pmtiles show --metadata`),
-// so we author symbol layers directly against those source layers.
+// fills/lines/background. The pmtiles we extracted carries `name` on the
+// `roads`, `places`, and `water` source layers, so we author symbol layers
+// directly against them.
 //
 // Fonts come from protomaps.github.io/basemaps-assets/fonts (key-free).
 
@@ -161,7 +161,6 @@ export function basemapLabelLayers(source = 'protomaps') {
     },
 
     // ---------- Road labels ----------
-    // Highways (placed first so other labels can leapfrog if overlapping).
     {
       id: 'roads_highway_label',
       type: 'symbol',

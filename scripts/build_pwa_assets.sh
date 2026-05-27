@@ -5,9 +5,8 @@
 # The SVG is self-contained: every visible shape (including the "OBMS"
 # wordmark) is encoded as a vector <path>, so rasterization needs no fonts
 # and produces identical output on any machine. If you ever re-edit the
-# SVG with live <text>, run the Inkscape text-to-path step before
-# committing — see scripts/svg_text_to_path.md (or just re-run Inkscape
-# with --export-text-to-path).
+# SVG with live <text>, convert text to paths (Inkscape: Object to Path,
+# or --export-text-to-path) before committing.
 #
 # Requires: brew install librsvg  (provides rsvg-convert)
 set -euo pipefail

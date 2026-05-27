@@ -2,8 +2,10 @@
 // f = g + h. State per entry carries enough context to charge turn and
 // crossing penalties at expansion time without revisiting the parent.
 //
-// Heuristic: haversine distance to goal (ft) × min multiplier (1.0).
-// Admissible because no edge costs less per foot than its raw length.
+// Heuristic: raw haversine distance to goal (ft). Admissible because no
+// edge costs less per foot than its straight-line length (AAA tier
+// multiplier = 1.0, all other multipliers ≥ 1.0, turn/crossing/elevation
+// surcharges ≥ 0).
 //
 // All cost functions take a `weights` object as their first argument, so
 // the caller can run several A* searches with different weight sets to
@@ -144,10 +146,6 @@ function endExits(weights, graph, spec) {
 /**
  * Find the shortest path under the given `weights`. startSpec/endSpec are
  *   { kind: 'node', nodeId } OR { kind: 'edge', projection }.
- *
- * `penaltyEdgeIds` (optional Set<number>): edge IDs whose cost is
- *   multiplied by `penaltyMultiplier` during this run. Used by the
- *   penalize-and-rerun fallback to coax a visually distinct alternate.
  *
  * Returns { pathEdgeIds, pathNodeIds, totalCostFt, totalLengthFt,
  *           prefixGeom, suffixGeom } or null.

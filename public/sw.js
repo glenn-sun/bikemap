@@ -32,8 +32,9 @@ const EXT_CACHE   = 'bikemap-external-v1';
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(SHELL_CACHE);
-    // Use addAll with explicit Request objects so we control caching mode
-    // and avoid the implicit credentials-include behavior.
+    // Per-URL fetch + cache.put (rather than cache.addAll) so one failed
+    // precache item doesn't abort the whole install, and so we control
+    // cache mode + credentials on each request.
     await Promise.all(PRECACHE_MANIFEST.map(async (url) => {
       try {
         const resp = await fetch(url, { cache: 'reload', credentials: 'same-origin' });
@@ -74,7 +75,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   // (2) Live version manifest — always network-first (short timeout)
-  // so the update banner can react quickly to a fresh deploy.
+  // so the Settings → Manage data check surfaces fresh deploys quickly.
   if (url.pathname.endsWith('/data/version.json')) {
     event.respondWith(networkFirst(req, DATA_CACHE, 3000));
     return;
@@ -149,7 +150,6 @@ async function cacheFirst(req, cacheName) {
     }
     return resp;
   } catch (e) {
-    // Fall through; the caller sees a network error.
     throw e;
   }
 }

@@ -1,16 +1,6 @@
 // Loader + spatial index for the routing graph produced by
 // scripts/build_graph.py. Columnar layout matches the Python writer.
-//
-// Public API:
-//   const graph = await loadGraph(url);
-//   graph.findNearestNode(lon, lat) -> nodeId | null
-//   graph.nodeCoord(id) -> [lon, lat]
-//   graph.edge(id) -> { from, to, lengthFt, lanes, hasCenterline, isAlley,
-//                       facilityCategory, facilityModelType, oneway,
-//                       bearingStart, bearingEnd, streetName,
-//                       geometry: [[lon, lat], ...] }
-//   graph.outgoingEdges(nodeId) -> int[]
-//   graph.nodeFlags(id) -> { hasSignal, hasCrosswalk, hasBeacon, isTrafficCircle }
+// See method exports on the Graph class below.
 
 export async function loadGraph(url) {
   const res = await fetch(url);
@@ -27,7 +17,8 @@ class Graph {
     this.models = raw.modelTypes;
     this.geoms = raw.geoms;
     // Per-geom elevation profiles (parallel to geoms; one float-per-point
-    // in raw geometry orientation). Added by scripts/build_elevation.py.
+    // in raw geometry orientation). Added by scripts/sample_dtm.py (and
+    // then heat-eq-corrected on flagged corridors by resolve_elevation.py).
     // Older graphs without elevation simply omit this field; the routing
     // engine then treats elevation as zero everywhere.
     this.geomElevs = raw.geomElevs || null;
@@ -146,10 +137,12 @@ class Graph {
    *  own. The other edge in the pair may or may not be tagged. Set in
    *  build_graph.py's detect_untagged_crossings(). */
   edgeIsUntaggedCrossing(id) { return (this.e.flags[id] & 64) !== 0; }
-  /** Derived flag: this untagged edge is within ~200 ft graph-walk
-   *  distance of a tagged (bridge/tunnel/layered/covered/indoor) edge.
-   *  Approach ramps where OSM didn't tag the elevation transition.
-   *  See `edgeApproachOf(id)` for the nearest source category. */
+  /** Derived flag: this untagged edge is within ~200 ft polyline distance
+   *  of a tagged (bridge/tunnel/layered/embankment/cutting/covered/indoor)
+   *  edge. Approach ramps where OSM didn't tag the elevation transition.
+   *  Straddling edges are split at the 200 ft isoline in build_graph.py
+   *  so only the close half carries this flag. See `edgeApproachOf(id)`
+   *  for the nearest source category. */
   edgeIsApproach(id) { return (this.e.flags[id] & 128) !== 0; }
   /** OSM `layer=*` value as signed int, or null when unset. Returns null
    *  if the graph predates the layer column. */
@@ -157,14 +150,16 @@ class Graph {
     return this.e.layer ? this.e.layer[id] : null;
   }
   /** Nearest tagged-source category for approach edges. Returns one of
-   *  "bridge" / "tunnel" / "layered" / "covered" / "indoor", or null
-   *  when this edge is not flagged as an approach. */
+   *  "bridge" / "tunnel" / "layered" / "embankment" / "cutting" /
+   *  "covered" / "indoor", or null when this edge is not flagged as
+   *  an approach. */
   edgeApproachOf(id) {
     return this.e.approachOf ? this.e.approachOf[id] : null;
   }
 
   /** Total uphill rise (ft) along this directed edge. Computed offline
-   *  in build_elevation.py from the smoothed per-geom elevation profile.
+   *  in sample_dtm.py from the smoothed per-geom elevation profile (and
+   *  recomputed analytically on flagged corridors by resolve_elevation.py).
    *  Returns 0 if the graph has no elevation data. */
   edgeUphillFt(id) {
     return this.e.uphillFt ? this.e.uphillFt[id] : 0;
@@ -280,7 +275,7 @@ class Graph {
       this._compSize.push(size);
     }
     // Identify the largest component — endpoints in components smaller than
-    // a threshold are considered "untoutable" for snap-from purposes.
+    // a threshold are considered "unroutable" for snap-from purposes.
     let largest = 0;
     for (let i = 1; i < this._compSize.length; i++) {
       if (this._compSize[i] > this._compSize[largest]) largest = i;
@@ -321,7 +316,7 @@ class Graph {
       }
     }
     if (bestId < 0) {
-      // Expand to 5x5 then 9x9 if needed.
+      // Expand ring by ring up to 9x9.
       for (let r = 2; r <= 4 && bestId < 0; r++) {
         for (let dx = -r; dx <= r; dx++) {
           for (let dy = -r; dy <= r; dy++) {
@@ -484,8 +479,6 @@ class Graph {
     // The mapping is: from = reversed ? raw[N-1] : raw[0].
     const fromAtStartOfRaw = !reversed;
     const goingTowardFrom = (toEndpoint === 'from');
-    // In raw-geometry frame, "toward raw[0]" if (fromAtStartOfRaw && goingTowardFrom)
-    //                                          || (!fromAtStartOfRaw && !goingTowardFrom)
     const towardRawStart = fromAtStartOfRaw === goingTowardFrom;
     if (towardRawStart) {
       // [projection, raw[segmentIndex-1], raw[segmentIndex-2], ..., raw[0]]

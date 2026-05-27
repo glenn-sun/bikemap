@@ -88,9 +88,8 @@ export function buildElevationSeries(graph, route) {
     }
   }
 
-  // ---- Suffix: walk the suffix polyline starting from the end node, at the
-  // last edge's end-node elevation, ramping into a "projection-end" elev
-  // (same proxy as the prefix).
+  // ---- Suffix: hold elevation flat at the last edge's end-node value
+  // along the suffix polyline (same proxy as the prefix).
   if (route.suffixGeom && route.suffixGeom.length > 1) {
     const suffix = route.suffixGeom;
     const endNodeElev = elevations[elevations.length - 1];

@@ -13,16 +13,10 @@ Re-run when source data changes:
     pip install requests shapely      # already installed for fetch_data.py
     python3 scripts/build_graph.py
 
-Notes / decisions:
-
-- Spatial joins use a 15 m buffer for streets, 12 m for control points (mod
-  to ~30 m for traffic-circle clusters). These radii are tuned for Seattle's
-  typical street widths but can be revisited.
-- A two-way street becomes two directed edges with mirrored bearings so
-  future directional cost terms can fold in without re-shaping the graph.
-- Per-edge geometry is stored inline (a list of [lon, lat] points). Plain
-  JSON. The file is in the ~10-20 MB range — fine for a prototype; binary
-  packing is the next escalation if it gets in the way.
+Spatial-join buffers: ~15 m streets, ~20 m control-point snapping
+(signals / crosswalks / beacons / stop signs), ~18 m traffic-circle
+clusters, ~12 m bike-facility classification. Two-way streets become
+two directed edges with mirrored bearings.
 """
 
 from __future__ import annotations
@@ -42,30 +36,21 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "public" / "data"
 OUT  = DATA / "routing_graph.json"
 
-# Roads always included (cars + bikes).
 ROAD_HIGHWAYS = {
     "residential", "tertiary", "tertiary_link",
     "secondary", "secondary_link",
     "primary", "primary_link",
     "unclassified", "living_street",
 }
-# Bike-specific OSM types — always allowed.
 CYCLEWAY_HIGHWAYS = {"cycleway"}
-# Pedestrian-ish types — require explicit bike access tag, else skipped.
+# Require an explicit bike-access tag to admit.
 RESTRICTED_HIGHWAYS = {"path", "footway", "track", "pedestrian"}
-# Sidewalks (and crossings) are now also routable as a last-resort option;
-# they're flagged separately and the routing engine applies a fixed 3×
-# multiplier to discourage their use unless absolutely necessary. Tagging
-# is OSM `highway=footway` + `footway in (sidewalk, crossing)`. Crossings
-# are typically short (≤ 50 ft) segments perpendicular to a road; the
-# engine ALWAYS allows segments ≤ 50 ft regardless of the user toggle.
+# Sidewalks (highway=footway + footway=sidewalk|crossing) are admitted
+# via _is_sidewalk; cost.js applies a 3× multiplier.
 
-# Hardcoded refusals — never route on these even with bicycle=yes.
 NEVER = {"motorway", "motorway_link", "trunk", "trunk_link", "construction",
          "raceway", "proposed", "abandoned", "razed"}
 
-# Constants matching the JS cost-function schema (kept here for the graph
-# build; the JS side has its own copy for tunability).
 FT_PER_METER = 3.28084
 
 
@@ -210,12 +195,9 @@ def detect_geometric_circles(nodes, edges, max_perim_ft=200, max_diameter_ft=60)
 
 
 def extract_osm_circles(elements):
-    """Return OSM nodes tagged as some kind of traffic circle / mini-
-    roundabout as (lon, lat) tuples — supplemental points to fill gaps in
-    SDOT's Traffic_Circles_view dataset. Note that OSM Seattle has very
-    sparse coverage (~50 nodes total vs SDOT's 1000+), so this is just a
-    last-resort supplement.
-    """
+    """Return OSM mini-roundabout / roundabout / circular nodes as
+    (lon, lat). Supplements SDOT's Traffic_Circles_view (which has
+    ~1063 features but is incomplete) plus geometric detection."""
     pts = []
     for el in elements:
         if el["type"] != "node":
@@ -242,8 +224,7 @@ def parse_osm(elements, seattle_poly):
         elif el["type"] == "way":
             ways_raw.append(el)
 
-    # Find intersection nodes — nodes that appear in >1 way OR endpoints of a
-    # way OR appear multiple times in the same way (rare).
+    # Intersection nodes: appear in >1 way, are endpoints, or repeat in one way.
     occurrences = defaultdict(int)
     for w in ways_raw:
         tags = w.get("tags", {})
@@ -257,8 +238,6 @@ def parse_osm(elements, seattle_poly):
             if i == 0 or i == len(nids) - 1:
                 occurrences[nid] += 1  # force endpoint to be a graph node
 
-    # Now build edges. An edge runs from one intersection-node to the next
-    # along a way.
     edges = []
     node_set = set()
     for w in ways_raw:
@@ -298,13 +277,7 @@ def parse_osm(elements, seattle_poly):
 
 
 def _is_sidewalk(tags):
-    """OSM tag heuristic for 'this way is a sidewalk or crosswalk'.
-
-    These come in as `highway=footway` + `footway=sidewalk|crossing` (the
-    most common pattern in Seattle OSM). Treated as routable but heavily
-    penalized — see `is_sidewalk` flag handling in cost.js. NOT included
-    in any other classification (no cycleway, no AAA).
-    """
+    """True for highway=footway + footway in (sidewalk, crossing)."""
     if tags.get("highway") != "footway":
         return False
     return tags.get("footway") in ("sidewalk", "crossing")
@@ -364,16 +337,11 @@ def sample_along(line, n=4):
 def spatial_join_streets(edges, streets_path):
     """Match SDOT seattle_streets attrs onto each OSM edge.
 
-    Off-street trail edges (highway in CYCLEWAY_HIGHWAYS | RESTRICTED_HIGHWAYS)
-    are SKIPPED. At a trail × street intersection the street's centerline
-    runs through the trail's geometry and wins the "nearest-feature within
-    ~15 m" contest, contaminating the trail edge with the street's
-    ONEWAY/lanes/centerline attributes. The most catastrophic symptom
-    we've seen: BGT-on-Corliss at N 35th picked up Corliss's ONEWAY='Y'
-    and severed southbound connectivity on the trail, forcing a half-mile
-    detour for what should be a 16 ft hop. Trails get sdot={} here and
-    fall through to safe off-street defaults later (oneway=False from
-    parse_oneway, has_centerline=False from artclass=0, lane fallback).
+    Trail edges (CYCLEWAY_HIGHWAYS | RESTRICTED_HIGHWAYS) and sidewalks
+    SKIP this join — a street centerline at a trail crossing would win
+    the nearest-feature contest and contaminate the trail with the
+    street's ONEWAY/lanes. Skipped edges fall through to off-street
+    defaults via parse_oneway / artclass=0 / lane fallback.
     """
     print("  joining seattle_streets...")
     fc = json.loads(streets_path.read_text())
@@ -393,11 +361,6 @@ def spatial_join_streets(edges, streets_path):
     matched = 0
     skipped_trails = 0
     for e in edges:
-        # Trails and sidewalks both opt out of street-attribute join —
-        # sidewalks are close enough to a parallel road that the
-        # nearest-feature contest would assign the road's
-        # ONEWAY/SURFACEWIDTH to the sidewalk, falsely making it
-        # one-way and inflating its "lane" count.
         if e["tags"].get("highway") in TRAIL_HIGHWAYS or _is_sidewalk(e["tags"]):
             e["sdot"] = {}
             skipped_trails += 1
@@ -421,11 +384,6 @@ def spatial_join_streets(edges, streets_path):
                 "SPEEDLIMIT":   majority_attr([a.get("SPEEDLIMIT") for a in attrs_per_sample]),
                 "ONEWAY":       majority_attr([a.get("ONEWAY") for a in attrs_per_sample]),
                 "UNITDESC":     majority_attr([a.get("UNITDESC") for a in attrs_per_sample]),
-                # SLOPE_PCT is SDOT's per-segment grade in unsigned integer
-                # percent. Kept on each edge for v3 elevation work (the
-                # deprecated v2 pipeline relied on it; v3 may revisit). Trail
-                # edges (skipped above) get None — those rely on DTM-derived
-                # slope only.
                 "SLOPE_PCT":    majority_attr([a.get("SLOPE_PCT") for a in attrs_per_sample]),
             }
             matched += 1
@@ -438,28 +396,15 @@ def spatial_join_streets(edges, streets_path):
 def spatial_join_facilities(edges, data_dir):
     """Carry bike-facility CATEGORY + MODEL_TYPE onto each OSM edge.
 
-    Pulls from the SAME four GeoJSON sources that render dark-green-AAA on
-    the map, so the visual classification and routing classification stay
-    in sync (this used to use only bike_facilities.geojson, which meant
-    KC trails / SDOT multi-use trails / Bike+ Network "Existing" all
-    rendered as dark green but got the no-facility 1.8× multiplier in
-    routing — most visibly along the Burke-Gilman).
+    Pulls from the same four GeoJSON sources that render dark-green-AAA
+    on the map so visual ≡ routing classification:
+      1. bike_facilities.geojson — INSVC/PLNRECON only (UNDERCONS skipped).
+      2. multi_use_trails.geojson — all BKF-OFFST.
+      3. kc_regional_trails.geojson — all BKF-OFFST.
+      4. bike_plus_network.geojson Existing* — NGW/PBL/OFFST by subcategory.
 
-    Sources, in order of authoritativeness:
-      1. bike_facilities.geojson — CATEGORY taken as-is (only INSVC/PLNRECON;
-         UNDERCONS is skipped so an under-construction PBL doesn't get
-         routed as if installed; the road underneath still routes as
-         no-facility, which is what you want today).
-      2. multi_use_trails.geojson — SDOT off-street paths; all tagged
-         BKF-OFFST (no status field on this layer).
-      3. kc_regional_trails.geojson — KC regional trails clipped to
-         Seattle (heavily pre-filtered by the fetch step); BKF-OFFST.
-      4. bike_plus_network.geojson — only "Existing*" categories; mapped
-         to NGW/PBL/OFFST by sub-category. Proposed* is skipped (planned
-         infra isn't built yet).
-
-    All AAA tiers share multiplier 1.0× in cost.js, so within-AAA picks
-    are routing-cost-equivalent; the distinction only matters for popups.
+    All AAA tiers share multiplier 1.0× in cost.js; within-AAA the
+    distinction only matters for popups.
     """
     print("  joining facility sources (bike_facilities + multi_use_trails "
           "+ kc_regional_trails + bike_plus_network Existing)...")
@@ -491,8 +436,6 @@ def spatial_join_facilities(edges, data_dir):
                 geoms.append(part)
         return len(feats) - n_before
 
-    # Source 1: SDOT bike_facilities — installed (INSVC) or installed-but-
-    # slated-for-upgrade (PLNRECON). UNDERCONS is skipped on purpose.
     def _classify_bike_facilities(props):
         if props.get("CURRENT_STATUS") not in ("INSVC", "PLNRECON"):
             return None, None
@@ -504,20 +447,16 @@ def spatial_join_facilities(edges, data_dir):
     n1 = _add_source(data_dir / "bike_facilities.geojson", _classify_bike_facilities)
     print(f"    +{n1:,} from bike_facilities")
 
-    # Source 2: SDOT multi_use_trails — all off-street paths.
     def _classify_multi_use(props):
         return "BKF-OFFST", None
     n2 = _add_source(data_dir / "multi_use_trails.geojson", _classify_multi_use)
     print(f"    +{n2:,} from multi_use_trails")
 
-    # Source 3: KC regional trails (clipped to Seattle).
     def _classify_kc(props):
         return "BKF-OFFST", None
     n3 = _add_source(data_dir / "kc_regional_trails.geojson", _classify_kc)
     print(f"    +{n3:,} from kc_regional_trails")
 
-    # Source 4: Bike+ Network — only the Existing* sub-categories; Proposed
-    # is future plans and shouldn't change today's routing.
     BIKE_PLUS_AAA = {
         "Existing Bike+ - Non-Arterial": "BKF-NGW",     # neighborhood greenway
         "Existing Bike+ - Arterial":     "BKF-PBL",     # protected on arterial
@@ -574,13 +513,9 @@ def spatial_join_facilities(edges, data_dir):
         print(f"      {cat}: {n:,}")
 
 
-# 8 cardinal direction codes used by SDOT's FACING field, mapped to a
-# bit index (0..7) and the bearing (degrees, clockwise from north) of
-# the controlled approach. Convention: a stop sign with FACING='E' is
-# physically pointed east, so eastbound traffic (travel bearing 90°)
-# sees it and stops. So the bit index for FACING='E' is keyed by bearing
-# 90° = approaching-traffic travel direction.
-STOP_FACING_BITS = {  # SDOT FACING token  →  (bit-index, bearing of stopped traffic in deg)
+# SDOT FACING = direction the sign points = travel bearing of the
+# stopped approaching traffic (FACING='E' → eastbound traffic stops).
+STOP_FACING_BITS = {  # SDOT FACING  →  (bit-index, bearing of stopped traffic, deg)
     "N":  (0,   0),
     "NE": (1,  45),
     "E":  (2,  90),
@@ -598,11 +533,7 @@ def snap_control_points(nodes, signals_p, crosswalks_p, beacons_p, stop_signs_p)
     crossing penalty zeros out only when the cross-traffic is stopped,
     not the cyclist."""
     print("  snapping intersection controls...")
-    # ~20 m. The previous 12 m was too tight — SDOT typically digitizes
-    # signal heads at the curb, and several real signals on Aurora /
-    # Westlake / arterials fell 13-18 m from the corresponding graph
-    # node, causing spurious unsignalized-crossing penalties.
-    SEARCH_DEG = 0.0002
+    SEARCH_DEG = 0.0002  # ~20 m; signal heads digitized at the curb sit 13-18 m from the node
     flags = {nid: {"sig": False, "xwk": False, "bcn": False,
                    "stopBits": 0}
              for nid in nodes}
@@ -623,16 +554,10 @@ def snap_control_points(nodes, signals_p, crosswalks_p, beacons_p, stop_signs_p)
                         hits += 1
         print(f"    {key}: {hits:,} hits across nodes")
 
-    # Stop signs: OR the FACING bit into EVERY node within radius — same
-    # as the sig/xwk/bcn logic above. Snapping to a single nearest node
-    # is wrong here: OSM models each stop-sign-bearing curb as its own
-    # degree-2 node, ~20-30 ft from the intersection center. "Nearest"
-    # then routes each sign to its own curb node, missing the
-    # intersection center where the route's crossing penalty is
-    # actually evaluated. Spraying to all nearby nodes is benign because
-    # the only place crossingPenaltyFt fires is at multi-way junctions;
-    # curb (degree-2) nodes never have a cross-street and naturally
-    # short-circuit out.
+    # OR the FACING bit into every node within radius (same as sig/xwk/bcn).
+    # OSM models each curb-side stop as its own degree-2 node ~20-30 ft from
+    # the intersection center; "nearest" would scatter stops onto curb nodes
+    # instead of the intersection where crossingPenaltyFt fires.
     fc = json.loads(stop_signs_p.read_text())
     snapped = 0
     unknown_facing = 0
@@ -661,13 +586,11 @@ def snap_control_points(nodes, signals_p, crosswalks_p, beacons_p, stop_signs_p)
 def collapse_traffic_circles(nodes, edges, circles_path, extra_circle_pts=None):
     """Merge OSM nodes inside each traffic circle into one synthetic node.
 
-    Sets is_traffic_circle on the merged node. Edges that previously
-    terminated on a circle member point to the new synthetic node. Edges
-    with both endpoints inside the same circle are dropped (the circle's
-    internal geometry).
-
-    `extra_circle_pts` is a list of (lon, lat) tuples — OSM
-    mini_roundabouts that supplement SDOT's incomplete dataset.
+    Sets is_traffic_circle on the merged node; edges terminating on a
+    circle member re-point to the synthetic node; edges with both
+    endpoints inside the same circle are dropped. `extra_circle_pts`
+    supplements SDOT with OSM-tagged mini_roundabouts (Step B.1) and
+    geometric-detection centroids (Step G).
     """
     print("  collapsing traffic circles...")
     fc = json.loads(circles_path.read_text())
@@ -921,10 +844,8 @@ def expand_to_directed(nodes, edges, is_circle):
         except (TypeError, ValueError):
             artclass = 0
         has_centerline = artclass >= 1
-        # SDOT per-segment slope in unsigned integer percent (0..47 in
-        # Seattle). Magnitude only — SDOT doesn't publish sign. v3 may
-        # infer sign from DTM endpoint rise. None on trails / unmatched
-        # streets.
+        # SDOT slope magnitude (kept as debug cross-reference; routing
+        # reads sample_dtm + resolve_elevation output instead).
         raw_slope = sdot.get("SLOPE_PCT")
         try:
             slope_pct = int(raw_slope) if raw_slope is not None else None
@@ -943,24 +864,9 @@ def expand_to_directed(nodes, edges, is_circle):
                                initial_bearing(rev_coords[0], rev_coords[1]),
                                initial_bearing(rev_coords[-2], rev_coords[-1])))
 
-        # OSM elevation-related tagging. We capture five fields that affect
-        # whether a raw DTM sample at this edge represents real ground level:
-        #   bridge  — way carries over something else (DTM reads water/ground
-        #             *under* it, not the deck)
-        #   tunnel  — way passes under something (DTM reads the surface *above*
-        #             it, not the tunnel floor)
-        #   covered — roofed (arcade / awning / carport); not strictly an
-        #             elevation tag — way sits at ground level — but signals
-        #             "DSM-style first-return rasters would see something
-        #             above me". Cheap to keep; useful for v3 debugging.
-        #   indoor  — inside a building (mall corridor, station concourse).
-        #             Pair with `layer` for an actual vertical signal.
-        #   layer   — signed integer relative vertical ordering. The truest
-        #             elevation tag of the bunch: layer=1 = one structure up,
-        #             layer=-1 = one structure down.
-        # NOTE: prior versions of this script fused `covered=yes` into
-        # `is_tunnel`. Now split: a `covered=yes` edge is *covered*, not
-        # *tunnel*, unless it also has a tunnel tag.
+        # OSM elevation-related tags consumed by resolve_elevation.py
+        # (bridge / tunnel = DTM is structurally wrong; covered / indoor /
+        # embankment / cutting = informational; layer = signed level).
         bridge_tag     = (e["tags"].get("bridge")     or "").strip().lower()
         tunnel_tag     = (e["tags"].get("tunnel")     or "").strip().lower()
         covered_tag    = (e["tags"].get("covered")    or "").strip().lower()
@@ -979,17 +885,10 @@ def expand_to_directed(nodes, edges, is_circle):
         except ValueError:
             layer = None
 
-        # Sidewalk metadata (None on non-sidewalk edges). Computed once
-        # for the undirected segment in annotate_sidewalks(); the same
-        # offset bearing and crosswalk lane count apply to both
-        # directions of travel.
         is_sidewalk = _is_sidewalk(e["tags"])
         sw_bearing  = e.get("sidewalk_offset_bearing")
         crosswalk_l = e.get("crosswalk_lanes")
-        # Override the SDOT-inferred lane count for sidewalks — a sidewalk
-        # is one pedestrian-width "lane", not the parallel road's 3+ car
-        # lanes, and the crossing-penalty inner loop reads `lanes` to
-        # decide whether the cyclist is on a "big" road.
+        # Sidewalks are one pedestrian "lane", not the parallel road's lanes.
         if is_sidewalk:
             lanes = 1.0
 
@@ -1026,21 +925,11 @@ def expand_to_directed(nodes, edges, is_circle):
 
 
 def detect_untagged_crossings(directed_edges):
-    """Flag any way-segment that geometrically crosses another way-segment
-    on the 2D plane without sharing an OSM node, and that itself carries
-    no elevation tag (bridge / tunnel / covered / indoor / layer). The
-    *other* edge in the crossing pair may or may not be tagged — we only
-    flag the untagged participant(s).
-
-    Two categories of crossing pair (both reported, both flagged):
-      - both-untagged  → true ambiguity, v3 can't place either in 3D
-      - one-tagged     → OSM-canonical (the tagged way's tag is normally
-                         sufficient), but worth eyeballing for tagging
-                         gaps and to confirm OSM intent
-
-    Skips shared-node pairs (those are normal junctions). Returns the
-    set of directed-edge indices to mark with the bit-64 flag; both
-    forward + reverse copies of a flagged way-segment receive it."""
+    """Flag way-segments that 2D-cross another way without sharing an OSM
+    node AND have no elevation tag (bridge / tunnel / covered / indoor /
+    layer). The other side of the pair may be tagged or not — only the
+    untagged participant(s) get flagged. Returns the set of directed-edge
+    indices for bit 64; fwd + rev copies of a segment share the flag."""
     try:
         from shapely.geometry import LineString
         from shapely.strtree import STRtree
@@ -1109,13 +998,8 @@ def detect_untagged_crossings(directed_edges):
     return flagged_directed
 
 
-# Priority for tie-breaking when an approach edge is equidistant from
-# multiple tagged sources. Lower number = higher priority. Bridge wins
-# most ties because it's by far the most common case and the highest
-# severity (raw DTM is most catastrophically wrong on bridges).
-# Embankment / cutting come AFTER bridge/tunnel/layered because the DTM
-# is *correct* on those (they're earthworks, not structures), so they're
-# informational rather than fix-needed — but still worth surfacing.
+# Tie-break priority for equidistant approach sources (lower = higher).
+# Embankment / cutting rank below structures because their DTM is correct.
 APPROACH_PRIORITY = {
     "bridge":     0,
     "tunnel":     1,
@@ -1142,47 +1026,27 @@ def _source_category(e):
 
 
 def detect_approach_edges(directed_edges, max_dist_ft=200.0):
-    """Flag every untagged edge that's within `max_dist_ft` graph-walk
-    distance of any tagged (bridge/tunnel/layered/covered/indoor) edge.
-
-    Why this matters: OSM data frequently tags the bridge span itself
-    but NOT the ramp approaching it, even though the elevation change
-    is already happening on the approach. v3 will need to apply the
-    same "interpolate between trustworthy endpoints" fix to those ramps,
-    so we surface them here for visualization + later processing.
-
-    Algorithm: multi-source Dijkstra. Seed every tagged edge's endpoint
-    nodes at distance 0 with the source category. Relax outward along
-    the directed-edge adjacency until distance > max_dist_ft. Each
-    visited node remembers the closest-source (distance, category)
-    pair. Then for each untagged edge, look up both its endpoints; if
-    either is within range, this edge is an approach attributed to the
-    closer endpoint's source (ties broken by APPROACH_PRIORITY).
+    """Multi-source Dijkstra from every tagged edge's endpoints; relax
+    along directed-edge adjacency until distance > max_dist_ft. Untagged
+    edges with at least one endpoint in range become approaches,
+    attributed to the closer source (ties via APPROACH_PRIORITY). Picks
+    up ramps OSM didn't tag with `bridge=*` alongside their spans.
 
     Returns (flagged_full, flagged_partial):
-      flagged_full    : dict[edge_idx] -> category_string. Both
-                        endpoints within max_dist_ft. No further
-                        action; the whole edge is approach.
-      flagged_partial : list[dict] of split instructions. Exactly one
-                        endpoint within range; the polyline crosses
-                        the 200 ft isoline somewhere along its length.
-                        Each dict carries `edge_idx`, `close_node`,
-                        `far_node`, `cut_ft` (arc-length from close
-                        endpoint at which to split), and `category`.
-                        Consumed by apply_approach_splits()."""
+      flagged_full    : dict[edge_idx] -> category. Both endpoints in range.
+      flagged_partial : list of split instructions for edges that straddle
+                        the isoline (one endpoint in, one out). Each dict
+                        carries edge_idx, close_node, far_node, cut_ft (arc
+                        length from close), category. Consumed by
+                        apply_approach_splits()."""
     import heapq
 
-    # Build node -> list of (edge_idx, neighbor_node_id, length_ft).
-    # Edges are directed in our representation; for graph-walking we
-    # want undirected reachability, so include both directions even
-    # if only one directed edge exists between two nodes.
+    # Undirected adjacency (both halves added regardless of edge direction).
     adj = {}
     for i, e in enumerate(directed_edges):
         adj.setdefault(e["from"], []).append((i, e["to"], e["lengthFt"]))
         adj.setdefault(e["to"],   []).append((i, e["from"], e["lengthFt"]))
 
-    # Multi-source Dijkstra: push every tagged edge's BOTH endpoints
-    # at distance 0 with the source category.
     heap = []
     seen_seeds = set()
     n_tagged = 0
@@ -1295,30 +1159,19 @@ def _interpolate_polyline(coords, target_ft):
 def apply_approach_splits(nodes, directed_edges, flagged_full,
                            flagged_partial, untagged_crossings,
                            min_cut_ft=1.0):
-    """Replace each partial-approach directed edge with two halves that
-    meet at a NEW interior node, placed at exactly `cut_ft` arc-length
-    from the close endpoint. The close half inherits the approach flag;
-    the far half does not.
+    """Split each partial-approach segment at cut_ft from the close
+    endpoint; close half keeps the approach flag, far half doesn't.
+    Both directions of a bidirectional way share the new interior node.
 
-    The split is applied to ALL directed edges of the same way-segment
-    (fwd + rev for bidirectional ways), at the same arc-length point,
-    so both directions share the new interior node.
-
-    Side effects:
-      - `nodes` (dict[node_id] -> (lon, lat)) gains one new entry per
-        split way-segment.
-      - Returns (new_directed_edges, new_flagged_full, new_untagged_crossings)
-        with indices renumbered to the rebuilt edge list.
-
-    Skipped (treated as unflagged) when cut_ft < min_cut_ft — the close
-    endpoint is already essentially at the isoline; producing a sub-foot
-    sliver isn't worth the extra node.
+    Mutates `nodes` (adds one entry per split). Returns rebuilt
+    (directed_edges, flagged_full, untagged_crossings) with indices
+    renumbered. Slivers (< min_cut_ft) are special-cased: close-end
+    sliver → unflagged; far-end sliver → forced fully flagged.
     """
     from collections import defaultdict
 
-    # Group partials by way-segment (unordered endpoint pair). fwd and
-    # rev directed edges of the same segment agree on close_node and
-    # cut_ft by construction (the Dijkstra is undirected).
+    # Group partials by unordered endpoint pair; fwd + rev agree by
+    # construction (Dijkstra is undirected).
     seg_to_partial = defaultdict(list)
     for p in flagged_partial:
         e = directed_edges[p["edge_idx"]]
@@ -1330,9 +1183,7 @@ def apply_approach_splits(nodes, directed_edges, flagged_full,
     for i, e in enumerate(directed_edges):
         seg_to_edges[frozenset((e["from"], e["to"]))].append(i)
 
-    # Compute one cut point per way-segment; allocate new node IDs.
-    # New IDs sit above OSM's int64 range to avoid collisions
-    # (OSM IDs are non-negative int64; we use a high constant offset).
+    # New node IDs sit at 10^15 to avoid collisions with OSM ids.
     NEW_NODE_BASE = 10**15
     new_node_counter = 0
     seg_cut = {}      # key -> dict with cut info
@@ -1494,15 +1345,10 @@ def apply_approach_splits(nodes, directed_edges, flagged_full,
 
 def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
                             untagged_crossings, approach_edges, out_path):
-    """Dense-pack IDs and emit columnar JSON.
-
-    Columnar layout: one parallel array per attribute. Strings (street names,
-    facility codes) interned via lookup table. The router code in
-    src/routing/graph.js mirrors this shape.
-
-    Geometry sharing: directed forward and reverse edges of the same
-    undirected segment share a single entry in the `geoms` array; the edge
-    stores an index and a `reversed` flag.
+    """Dense-pack IDs and emit columnar JSON; src/routing/graph.js mirrors
+    this shape. Fwd + rev of the same undirected segment share one entry
+    in `geoms` (edge carries an index + `reversed` flag). Strings (street
+    names, facility codes) are interned.
     """
     print("  serializing...")
     used = set()
@@ -1584,24 +1430,12 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
     for i, e in enumerate(directed_edges):
         fr = remap[e["from"]]; to = remap[e["to"]]
         gidx, grev = add_geom(e["geometry"])
-        # Bitfield:
-        #    1 = hasCenterline       2 = oneway
-        #    4 = isBridge            8 = isTunnel
-        #   16 = isCovered          32 = isIndoor
-        #   64 = isUntaggedCrossing 128 = isApproach
-        #  256 = isEmbankment      512 = isCutting
-        # 1024 = isSidewalk
-        # Bridge / tunnel / covered / indoor / embankment / cutting are
-        # independent OSM elevation-related flags — same edge can have
-        # multiple set. Bridge and tunnel indicate the DTM is structurally
-        # wrong on this way (read water/ground under deck, or surface
-        # above tunnel). Embankment and cutting indicate real earthworks
-        # — the DTM IS correct, just informationally important to know
-        # the way is on raised earth or in a cut.
-        # Bit 64 (untaggedCrossing) and 128 (approach) are *derived*,
-        # not from OSM. See detect_untagged_crossings and
-        # detect_approach_edges for semantics. The nearest source
-        # category for approaches is recorded in `approachOf`.
+        # Bitfield (mirrored by src/routing/graph.js):
+        #    1 hasCenterline    2 oneway        4 isBridge      8 isTunnel
+        #   16 isCovered       32 isIndoor     64 isUntaggedCrossing
+        #  128 isApproach     256 isEmbankment 512 isCutting  1024 isSidewalk
+        # 64 + 128 are derived (see detect_untagged_crossings,
+        # detect_approach_edges); the rest read OSM tags directly.
         flags = 0
         if e["hasCenterline"]:     flags |= 1
         if e["oneway"]:            flags |= 2
@@ -1661,29 +1495,14 @@ def renumber_and_serialize(nodes, directed_edges, control_flags, is_circle,
             "geomRev":  e_geom_rev,
             "b0":       e_b0,
             "b1":       e_b1,
-            # SDOT per-segment slope magnitude, integer percent (0..47).
-            # null on trails / unmatched edges. Sign is unknown (SDOT
-            # publishes magnitude only); v3 pipeline will infer if useful.
+            # SDOT slope magnitude % (unsigned, null on unmatched edges).
             "slopePct": e_slopePct,
-            # OSM `layer=*` value as signed int; null when unset.
-            # Positive = elevated by N structures, negative = below by N.
-            # The cleanest "true" elevation tag in OSM (bridge / tunnel /
-            # covered / indoor only tell you the *structure type*, not how
-            # many levels above or below ground you are).
+            # OSM `layer=*` signed int; null when unset.
             "layer":    e_layer,
-            # Nearest tagged-source category for approach-flagged edges
-            # (bit 128). One of "bridge"/"tunnel"/"layered"/"covered"/
-            # "indoor", or null. Ties broken by APPROACH_PRIORITY order
-            # (bridge > tunnel > layered > covered > indoor).
+            # Nearest approach source for bit-128 edges; null otherwise.
+            # One of bridge/tunnel/layered/embankment/cutting/covered/indoor.
             "approachOf": e_approachOf,
-            # Sidewalk-only fields (null on non-sidewalk edges). See
-            # annotate_sidewalks(). `sidewalkBearing` is the perpendicular
-            # compass bearing FROM the nearest parallel road centerline
-            # TO the sidewalk midpoint, used at runtime to phrase
-            # "left/right sidewalk of <Street>". `crosswalkLanes` is the
-            # lane count of the most-laned road this sidewalk 2D-crosses,
-            # used to charge the unsignalized-crossing penalty when
-            # traversing a crosswalk.
+            # Sidewalk fields (null on non-sidewalks). See annotate_sidewalks.
             "sidewalkBearing": e_sidewalkBearing,
             "crosswalkLanes":  e_crosswalkLanes,
         },
@@ -1716,10 +1535,6 @@ def main():
 
     print("Step C: spatial-join SDOT seattle_streets...")
     spatial_join_streets(edges, DATA / "seattle_streets.geojson")
-
-    # (Alley spatial-join removed entirely — alleys are excluded at OSM
-    # parse time via _is_bike_routable, so they never enter the graph and
-    # an explicit isAlley flag adds nothing.)
 
     print("Step E: spatial-join all AAA-rendered facility sources...")
     spatial_join_facilities(edges, DATA)

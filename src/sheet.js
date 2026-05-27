@@ -2,7 +2,9 @@
 //
 // On small screens (@media max-width: 719px), the routing/directions panel
 // is a draggable bottom sheet with two snap points:
-//   peek — Start/End inputs + ride-style picker visible
+//   peek — only the "Directions" Start/End input section visible; the
+//          riding-style picker and enable-sidewalks toggle are below the
+//          sheet's clipped bottom edge
 //   full — scrollable full directions; leaves a small map strip up top
 //
 // Two input surfaces are wired:
@@ -21,40 +23,26 @@
 //      Taps on content (no movement) never toggle the sheet — only the
 //      pill does that.
 //
-// Implementation: pointer events for the pill (handles touch + mouse +
-// stylus); touch events for the content (we need touchmove with passive:
-// false to coexist with native scroll). Velocity-biased snap on release.
-//
-// The sheet uses `position: fixed; height: 100vh; transform: translateY()`
-// to slide vertically. To prevent the bottom of long step lists from
-// being cut off, we set #left-stack's max-height to the *visible* portion
-// of the sheet (snap - handle height) when snapping. Otherwise the inner
-// scroll container thinks it has full sheet height and can't expose all
-// content past the off-screen portion.
+// Sheet position is driven by `transform: translateY()`; #left-stack's
+// max-height is set to the *visible* portion (snap - handle height) so
+// the tail of long step lists doesn't get clipped below the snap edge.
 //
 // On desktop the controller no-ops and the sheet renders as a static
 // top-left panel via CSS.
 
 const SNAPS = ['peek', 'full'];
-// Drag-handle row height — matches the CSS `#sheet-handle-bar` mobile
-// rule. Used to size the inner scroll area so all content remains
-// reachable when scrolled.
+// Matches the CSS `#sheet-handle-bar` mobile height. Subtracted from
+// the snap height to size the inner scroll area.
 const HANDLE_HEIGHT = 26;
 
 // Static peek height: drag handle (26) + Directions section content
-// (h3 ~22 + 2 input rows w/ margin ~66 + section bottom padding ~12).
-// Section top padding is 0 on mobile (see #sheet #route-endpoints rule
-// in style.css), so the content sits flush with the drag handle and
-// the sheet shows ~10 px more of the map below than it used to.
-// The section's CSS is stable, so a static value is simpler than
-// measuring the DOM and dodges any layout-timing edge cases that
-// could shift snap heights mid-flow.
+// (h3 ~22 + 2 input rows w/ margin ~66 + bottom padding ~12). A static
+// value is simpler than measuring the DOM and avoids layout-timing
+// edge cases.
 //
-// KEEP IN SYNC with the initial `transform: translateY(calc(100vh -
-// 138px))` on `#sheet` in src/style.css. The CSS rule is what
-// positions the sheet before sheet.js runs; if it doesn't match this
-// value, the sheet flashes at the CSS height on load and then re-
-// snaps to PEEK_HEIGHT once initSheet executes.
+// KEEP IN SYNC with the `transform: translateY(calc(100vh - 138px))`
+// rule on `#sheet` in style.css — that CSS positions the sheet before
+// sheet.js runs, and a mismatch causes a snap-flash on load.
 const PEEK_HEIGHT = 138;
 
 // Gap (px) between the floating #app-header pill's bottom edge and the
@@ -111,8 +99,8 @@ function applySnap(name, { animate = true } = {}) {
   sheetEl.classList.toggle('dragging', !animate);
   sheetEl.style.transform = `translateY(${ty}px)`;
   sheetEl.dataset.snap = name;
-  // Constrain the inner scroll container to the actual visible portion
-  // of the sheet so all content can be reached.
+  // Without this, the inner scroll container sees the full sheet height
+  // and the tail of long step lists sits below the snap-clipped edge.
   if (scrollEl) {
     scrollEl.style.maxHeight = `${snapPx[name] - HANDLE_HEIGHT}px`;
   }
@@ -164,7 +152,6 @@ function nearestScrollAncestor(el) {
 
 export function snapSheet(name) {
   if (!isMobile()) return;
-  // Legacy callers may still pass 'half'; map to 'full'.
   if (name === 'half') name = 'full';
   applySnap(name, { animate: true });
 }
@@ -273,12 +260,10 @@ export function initSheet() {
 
   // ============ Content drag (touch only — coexists with native scroll) ============
   //
-  // Listen on the scroll container with touchmove { passive: false } so
-  // we can preventDefault and override native scrolling when the gesture
-  // should drag the sheet instead. The `claimed` decision is taken once
-  // per gesture (at the first move past DRAG_THRESHOLD_PX) and not
-  // revisited — switching mid-gesture would feel unpredictable and the
-  // browser may have already started scrolling.
+  // The `claimed` decision is taken once per gesture (at the first move
+  // past DRAG_THRESHOLD_PX) and not revisited — switching mid-gesture
+  // would feel unpredictable and the browser may have already started
+  // scrolling.
 
   let touch = null;
 

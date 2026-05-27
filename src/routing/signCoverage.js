@@ -1,14 +1,14 @@
 // Sign-coverage adjustment applied AFTER A* finds the route.
 //
 // Walks the route's polyline, snaps every bike-sign point within `signSnapFt`
-// to the route, marks the closest sign position (as a distance-along-route),
+// to the route, marks each closest-sign position (as a distance-along-route),
 // then computes the fraction of route distance whose nearest snapped sign
-// is > `signGapFt` away (along the route). That fraction times
-// `signCoverageMax` is added to the total cost multiplier (i.e. extra ft
-// equivalent to the same fraction of route length × signCoverageMax).
+// is more than `signGapFt` away (a sign "covers" ±signGapFt around itself).
+// Caller adds `uncoveredFraction × totalLengthFt × signCoverageMax` to the
+// route's total cost (see routing/ui.js).
 //
 // All thresholds come from the active `weights` object so a preset switch
-// picks up immediately.
+// picks up immediately (no graph rebuild).
 
 const FT_PER_METER = 3.28084;
 const R_M = 6371000.0;

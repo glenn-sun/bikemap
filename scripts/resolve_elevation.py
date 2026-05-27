@@ -1,6 +1,6 @@
 """Heat-equation elevation correction for flagged subgraph groups.
 
-For each connected component of v3-correction-flagged way-segments
+For each connected component of correction-flagged way-segments
 (bridge / tunnel / layered / untagged-crossing / approach), where
 connectivity is via shared OSM nodes:
 

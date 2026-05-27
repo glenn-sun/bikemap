@@ -54,17 +54,10 @@ export const TWISTS = [
 // counts as a "turn" worth a maneuver) — not a user preference.
 export const TURN_THRESHOLD_DEG = 30;
 
-// Sidewalk routing constants.
-//   SIDEWALK_MULTIPLIER  — fixed 3× cost multiplier on every sidewalk
-//                          edge (not user-tunable). The high penalty
-//                          ensures sidewalks are picked only when the
-//                          road alternative is materially worse.
-//   SHORT_SIDEWALK_FT    — sidewalk segments ≤ this length are always
-//                          allowed even when the user has disabled
-//                          sidewalks. They typically represent trail/
-//                          street stitching gaps where OSM uses a short
-//                          footway as the connector. Longer sidewalks
-//                          (along-road walks) are gated by the toggle.
+// Sidewalk routing constants (not user-tunable). Sidewalks always pay
+// 3× cost. Long sidewalks (> 50 ft) are gated by the user toggle; short
+// sidewalks (≤ 50 ft) are always allowed since they typically stitch
+// trail/street gaps. Application logic in `edgeMultiplier`.
 export const SIDEWALK_MULTIPLIER = 3.0;
 export const SHORT_SIDEWALK_FT = 50;
 
@@ -115,15 +108,15 @@ export function weightsFromSliders(s, signCoverageMax = SIGN_COV_BY_PRESET.custo
     // that also climb.
     uphillFtPenalty: 40 * s5,
     // Quadratic steepness penalty: penalty term is
-    //     s5 · steepCoeff · Σ_seg(lengthFt · max(0, slope - 0.02)²)
+    //     steepCoeff · Σ_seg(lengthFt · max(0, slope - 0.02)²)
     // where the sum is precomputed offline as `graph.edgeSteepFt2(eid)`.
     // The squared term means a 20% segment hurts MUCH more than two
     // 10% segments of the same combined length — sustained steep grades
     // are qualitatively worse for a cyclist than mild rolling terrain.
     // At s5=1, a 100-ft 10% segment adds ~256 ft equivalent (~2.5×
     // surcharge); a 100-ft 26% segment adds ~2300 ft (~24× its length).
-    // The 2% threshold matches `STEEP_THRESHOLD` baked into
-    // build_elevation.py's per-edge `steepFt2` precompute.
+    // The 2% threshold matches the `STEEP_THRESHOLD` constant baked
+    // into sample_dtm.py's per-edge `steepFt2` precompute.
     steepCoeff:        400 * s5,
     enableSidewalks,                     // gates long sidewalks (> 50 ft)
     sliders: { s1, s2, s3, s4, s5 },     // diagnostic / for UI display
@@ -187,7 +180,7 @@ export function edgeMultiplier(weights, graph, edgeId) {
  *    1. Linear uphill: total uphillFt × uphillFtPenalty.
  *    2. Quadratic steepness: precomputed steepFt2 × steepCoeff.
  *       `steepFt2 = Σ_seg(length · max(0, slope - 0.02)²)` aggregated by
- *       build_elevation.py so we don't walk the geometry at routing time.
+ *       sample_dtm.py so we don't walk the geometry at routing time.
  *  Downhill segments contribute nothing to either term. */
 export function elevationPenaltyFt(weights, graph, edgeId) {
   const up = graph.edgeUphillFt(edgeId);
@@ -229,12 +222,13 @@ export function crossingPenaltyByLanes(weights, lanes) {
   return Infinity;
 }
 
-// How close to perpendicular a cross-edge has to be (in degrees) to be
-// counted as an actual crossing. Smaller = stricter. The cross-edge's
-// axis must be at least PERPENDICULAR_MIN_DEG away from PARALLEL to
-// BOTH the prev and next edges; otherwise it's a continuation/fork
-// along the cyclist's own path (e.g. another segment of the same
-// street), not a perpendicular crossing.
+// Threshold (in degrees) for treating a cross-edge as a real crossing.
+// The cross-edge's axis must be at least PERPENDICULAR_MIN_DEG away
+// from PARALLEL to BOTH the prev and next edges; otherwise it's a
+// continuation/fork along the cyclist's own path (e.g. another segment
+// of the same street), not a perpendicular crossing. Larger value =
+// fewer candidates qualify as crossings (more permissive routing);
+// smaller value = more candidates qualify (more crossing penalties charged).
 const PERPENDICULAR_MIN_DEG = 60;
 
 // Axis-distance between two bearings: 0° = parallel/anti-parallel,
